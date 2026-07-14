@@ -14,13 +14,4 @@
 
 #include "ape_types.h"
 
-/*
- * state: search-and-rescue occupancy memory (full tier -- see
- * ape_types.h's ape_search_state_t doc). May be NULL (e.g. avoidance-
- * path calls that don't carry search state); when target_detected is 0
- * and state is non-NULL, candidate scoring's heading term rewards
- * frontier cells (unknown in the grid) over already-seen ones instead of
- * chasing a goal bearing. Updated in place from the current scan every
- * call.
- */
-ape_result_t ape2_dwa_plan(const ape_params_t *p, ape_search_state_t *state);
+ape_result_t ape2_dwa_plan(const ape_params_t *p);

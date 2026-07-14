@@ -3,7 +3,6 @@ venv/
 __pycache__/
 *.pyc
 logs/
-applog/
 .claude/settings.local.json
 native/ape_ops/build/
 native/ape_ops/gem5_bench/bench/build/

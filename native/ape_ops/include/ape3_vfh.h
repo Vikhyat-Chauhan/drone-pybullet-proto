@@ -17,12 +17,4 @@
 
 #include "ape_types.h"
 
-/*
- * state: search-and-rescue visited-cell memory (partial tier -- coarser
- * than ape2_dwa's occupancy grid, see ape_types.h's ape_search_state_t
- * doc). May be NULL. When target_detected is 0 and state is non-NULL,
- * valley scoring gets a least-visited bonus biasing exploration away
- * from already-covered ground. Updated in place (current drone cell
- * marked visited) every call.
- */
-ape_result_t ape3_vfh_plan(const ape_params_t *p, ape_search_state_t *state);
+ape_result_t ape3_vfh_plan(const ape_params_t *p);
