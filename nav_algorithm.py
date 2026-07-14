@@ -132,7 +132,7 @@ class EventDecisionCfg:
 
     v_cap_frac: float = 0.75
     selector_mode: str = "CA"
-    commit_hold_s: float = 0.9
+    commit_hold_s: float = 0.3
 
     sudden_obj_radius_m: float = 1.2
     sudden_obj_clearance_m: float = 0.3
@@ -142,19 +142,18 @@ class EventDecisionCfg:
 
 @dataclass
 class ApeAlgoCfg:
-    """Tuning parameters for the native DWA and VFH planners (APE3 and
-    APE2 respectively -- see ape_native.py for the APE2<->APE3 identity
-    swap), plus the multi-layer LiDAR geometry constants (mirrors the
+    """Tuning parameters for the native DWA (APE2) and VFH (APE3)
+    planners, plus the multi-layer LiDAR geometry constants (mirrors the
     original model.sdf's <vertical> block -- kept as plain numbers here
     since there's no SDF in this port)."""
     n_layers: int = 5
     vertical_angle_min: float = -0.0872665   # -5 deg
     vertical_angle_increment: float = 0.0436332  # (2*5deg)/(n_layers-1)
 
-    dwa_n_v: int = 5
-    dwa_n_w: int = 7
+    dwa_n_v: int = 3
+    dwa_n_w: int = 3
     dwa_dt: float = 0.3
-    dwa_horizon_s: float = 1.5
+    dwa_horizon_s: float = 0.6
     dwa_w_clear: float = 0.4
     dwa_w_heading: float = 0.4
     dwa_w_speed: float = 0.2
@@ -251,7 +250,6 @@ class LidarTargetNavigatorCA:
         self._evt_deadline_at: float = 0.0
         self._evt_lock = threading.Lock()
         self._evt_proposals: Dict[str, Dict] = {}
-        self._evt_threads: List[threading.Thread] = []
 
         self._evt_active: bool = False
         self._evt_resolved: bool = False
@@ -397,9 +395,9 @@ class LidarTargetNavigatorCA:
         return min(v_des, vmax)
 
     # ---------- event planners ----------
-    def _evt_put(self, name, v, wz, vz, score):
+    def _evt_put(self, name, v, wz, vz, score, ready_t):
         with self._evt_lock:
-            self._evt_proposals[name] = {"v": v, "wz": wz, "vz": vz, "score": score, "ready_t": self._sim_time()}
+            self._evt_proposals[name] = {"v": v, "wz": wz, "vz": vz, "score": score, "ready_t": ready_t}
 
     def _build_ape_params(self, snap, multilayer: bool) -> ape_native.ApeParams:
         """Marshals the raw scan + scalar nav state + relevant config into
@@ -479,36 +477,40 @@ class LidarTargetNavigatorCA:
 
         return p
 
-    def _evt_native_plan_and_topup(self, plan_fn, params: ape_native.ApeParams, budget_ms: float):
-        """Calls the real native planner (genuine compute, releases the
-        GIL), then tops up with a sleep to reach the nominal gem5-derived
-        budget_ms. This top-up stays on wall-clock time.perf_counter()/
-        time.sleep() deliberately -- it emulates real MCU compute latency,
-        not sim time, so it's independent of SimClock."""
-        t0 = time.perf_counter()
-        result = plan_fn(params)
-        elapsed_s = time.perf_counter() - t0
-        time.sleep(max(0.0, budget_ms / 1000.0 - elapsed_s))
-        return result
-
-    def _evt_plan_ape1(self, snap, budget_ms):
+    def _evt_plan_ape1(self, snap, budget_ms, arrival_sim_t):
+        """Calls the real native planner synchronously (genuine compute,
+        actual wall-clock cost is microseconds per the gem5 measurements)
+        and schedules the proposal's availability in SIM time --
+        ready_t = arrival_sim_t + budget_ms/1000 -- rather than emulating
+        the gem5-measured MCU latency via a real wall-clock sleep on a
+        background thread. A wall-clock sleep can't be made to reliably
+        represent a few-millisecond budget once the outer loop is
+        running unthrottled (headless batch mode advances SimClock tens
+        of times faster than real time, and GIL/thread-scheduling
+        latency alone can dwarf the intended sleep), whereas scheduling
+        readiness against SimClock is exact and deterministic regardless
+        of how fast the sim is actually running -- and identical in GUI
+        mode, where SimClock is paced to real time anyway."""
         params = self._build_ape_params(snap, multilayer=False)
-        r = self._evt_native_plan_and_topup(ape_native.plan_ape1, params, budget_ms)
-        return self._evt_put("APE1", r.v, r.wz, r.vz, r.score)
+        r = ape_native.plan_ape1(params)
+        ready_t = arrival_sim_t + max(0.0, budget_ms) / 1000.0
+        return self._evt_put("APE1", r.v, r.wz, r.vz, r.score, ready_t)
 
-    def _evt_plan_ape2(self, snap, budget_ms):
-        # APE2 = VFH (native_api.c's ape_native_plan_ape2); needs the
-        # multilayer scan its polar histogram bins over.
-        params = self._build_ape_params(snap, multilayer=True)
-        r = self._evt_native_plan_and_topup(ape_native.plan_ape2, params, budget_ms)
-        return self._evt_put("APE2", r.v, r.wz, r.vz, r.score)
-
-    def _evt_plan_ape3(self, snap, budget_ms):
-        # APE3 = DWA (native_api.c's ape_native_plan_ape3); single-layer
+    def _evt_plan_ape2(self, snap, budget_ms, arrival_sim_t):
+        # APE2 = DWA (native_api.c's ape_native_plan_ape2); single-layer
         # scan is sufficient for its forward-simulated candidate scoring.
         params = self._build_ape_params(snap, multilayer=False)
-        r = self._evt_native_plan_and_topup(ape_native.plan_ape3, params, budget_ms)
-        return self._evt_put("APE3", r.v, r.wz, r.vz, r.score)
+        r = ape_native.plan_ape2(params)
+        ready_t = arrival_sim_t + max(0.0, budget_ms) / 1000.0
+        return self._evt_put("APE2", r.v, r.wz, r.vz, r.score, ready_t)
+
+    def _evt_plan_ape3(self, snap, budget_ms, arrival_sim_t):
+        # APE3 = VFH (native_api.c's ape_native_plan_ape3); needs the
+        # multilayer scan its polar histogram bins over.
+        params = self._build_ape_params(snap, multilayer=True)
+        r = ape_native.plan_ape3(params)
+        ready_t = arrival_sim_t + max(0.0, budget_ms) / 1000.0
+        return self._evt_put("APE3", r.v, r.wz, r.vz, r.score, ready_t)
 
     # ---------- event helpers ----------
     def _evt_deadline_feasible(self, deadline_s: float) -> bool:
@@ -531,10 +533,6 @@ class LidarTargetNavigatorCA:
     def _evt_clear(self):
         with self._evt_lock:
             self._evt_proposals.clear()
-        for t in self._evt_threads:
-            if t.is_alive():
-                t.join(timeout=0.002)
-        self._evt_threads.clear()
         self._pending_evt = None
         self._evt_deadline_at = 0.0
         self._evt_active = False
@@ -565,7 +563,7 @@ class LidarTargetNavigatorCA:
                 with self._evt_lock:
                     self._evt_proposals.pop(name, None)
                 t0 = time.perf_counter()
-                fn(_snap, 0)
+                fn(_snap, 0, 0.0)
                 times_ms.append((time.perf_counter() - t0) * 1000.0)
             results[name] = {
                 "mean": statistics.mean(times_ms),
@@ -667,8 +665,13 @@ class LidarTargetNavigatorCA:
         front, left, right, stale, scan, now = self._scan_metrics()
 
         # ---- Event intake ----
-        evt = self._evt_queue.pop()
-        if evt is not None:
+        # A tick may see more than one newly-armed arrival (event
+        # producers aren't required to space arrivals a full tick
+        # apart) -- process them in order through the same
+        # single-active-race logic as before (a new arrival while a
+        # race is in flight salvages/preempts it exactly like a
+        # single-slot queue used to).
+        for evt in self._evt_queue.pop_new():
             deadline_s = max(0.0, float(evt.get("deadline_s", 0.0)))
             self._log("EVENT", type="ARRIVAL",
                       t_rec=evt["t_recv"],
@@ -677,8 +680,9 @@ class LidarTargetNavigatorCA:
             self._events_handled += 1
 
             if self._evt_active:
+                now_t = self._sim_time()
                 with self._evt_lock:
-                    ready_curr = dict(self._evt_proposals)
+                    ready_curr = {n: p for n, p in self._evt_proposals.items() if now_t >= p["ready_t"]}
                 salvage_order = self._evt_cascade_order()
                 chosen_curr = next(
                     ((n, ready_curr[n]) for n in salvage_order if n in ready_curr),
@@ -715,10 +719,6 @@ class LidarTargetNavigatorCA:
 
                 with self._evt_lock:
                     self._evt_proposals = {}
-                for t in self._evt_threads:
-                    if t.is_alive():
-                        t.join(timeout=0.001)
-                self._evt_threads = []
 
                 snap = {
                     "v_cmd": v_cmd,
@@ -727,23 +727,20 @@ class LidarTargetNavigatorCA:
                     "cloud": self._cloud_provider.latest(),
                 }
 
+                # Each planner's real (fast) native call runs
+                # synchronously here; its proposal's *availability* is
+                # scheduled in sim-time (ready_t, set inside
+                # _evt_plan_apeN) rather than emulated via a real
+                # wall-clock sleep on a background thread -- see
+                # _evt_plan_ape1's docstring for why.
                 mode = self._edc.selector_mode
-                threads = []
+                arrival_sim_t = self._sim_time()
                 if mode in ("CA", "APE1"):
-                    threads.append(threading.Thread(
-                        target=self._evt_plan_ape1,
-                        args=(snap, self._edc.ape1_budget_ms), daemon=True))
+                    self._evt_plan_ape1(snap, self._edc.ape1_budget_ms, arrival_sim_t)
                 if mode in ("CA", "APE2"):
-                    threads.append(threading.Thread(
-                        target=self._evt_plan_ape2,
-                        args=(snap, self._edc.ape2_budget_ms), daemon=True))
+                    self._evt_plan_ape2(snap, self._edc.ape2_budget_ms, arrival_sim_t)
                 if mode in ("CA", "APE3"):
-                    threads.append(threading.Thread(
-                        target=self._evt_plan_ape3,
-                        args=(snap, self._edc.ape3_budget_ms), daemon=True))
-                self._evt_threads = threads
-                for t in self._evt_threads:
-                    t.start()
+                    self._evt_plan_ape3(snap, self._edc.ape3_budget_ms, arrival_sim_t)
 
         event_active = self._evt_active and (self._pending_evt is not None)
 
@@ -786,9 +783,10 @@ class LidarTargetNavigatorCA:
 
         # ---------- Event window — opportunistic best-available selector ----------
         if event_active:
-            tl = max(0.0, self._evt_deadline_at - self._sim_time())
+            now_t = self._sim_time()
+            tl = max(0.0, self._evt_deadline_at - now_t)
             with self._evt_lock:
-                ready = dict(self._evt_proposals)
+                ready = {n: p for n, p in self._evt_proposals.items() if now_t >= p["ready_t"]}
 
             cascade = self._evt_cascade_order()
             best_ready = next(((n, ready[n]) for n in cascade if n in ready), None)

@@ -14,7 +14,7 @@ class TeleopConfig:
 
     # --- World gen ---
     fixed_seed: bool = False
-    world_gen_seed_offset: int = 1234
+    world_gen_seed_offset: int = 7777
     # Matches CANavigator's original exactly (arena.ArenaCfg's domain is
     # back to -100..100 x -50..50, same as the Gazebo world).
     target_distance: float = 150

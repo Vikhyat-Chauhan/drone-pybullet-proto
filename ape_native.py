@@ -1,10 +1,10 @@
 """
 ape_native.py — ctypes bridge to the native APE planners
-(native/ape_ops/): APE1 = reactive potential-field/Bug-style
-nudge, APE2 = Vector Field Histogram, APE3 = Dynamic Window Approach
-(identities deliberately swapped at the native_api.c dispatch layer from
-the ape2_dwa.c/ape3_vfh.c source filenames, so the heavier/slower
-planner -- DWA -- sits under the APE3 label).
+(native/ape_ops/): APE1 = reactive potential-field/Bug-style nudge,
+APE2 = Dynamic Window Approach (medium compute), APE3 = Vector Field
+Histogram (most compute, most sophisticated) -- dispatch matches the
+ape2_dwa.c/ape3_vfh.c source filenames, and the gem5 cycle table
+(gem5_measured_latencies.py) is keyed the same way.
 These are the REAL decision-making algorithms, not a synthetic cost
 proxy — nav_algorithm.py's role in the APE path is to marshal sensor
 data + config into a call here and unpack the result; no algorithm logic

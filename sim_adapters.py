@@ -167,26 +167,42 @@ class CloudProvider:
 
 
 class EventQueue:
-    """Replaces _EventSub + the ROS String pub/sub transport. Preserves
-    _EventSub's exact semantics: only the newest unconsumed event
-    survives (this is NOT a FIFO), push overwrites, pop clears, and a
-    "__RESET__" kind clears without becoming a deliverable event."""
-    def __init__(self):
+    """Multi-slot mailbox for newly-armed events. Used to be a single-slot
+    (last-write-wins) mailbox when only one event could be "in flight" at
+    a time; push() appends (defensively capped) and pop_new() atomically
+    drains and returns everything pushed since the last call, so a burst
+    of events landing in the same tick is processed in arrival order
+    instead of the newest silently clobbering the others. A "__RESET__"
+    kind still clears the queue without becoming a deliverable event."""
+    def __init__(self, max_pending: int = 16):
         self._lock = threading.Lock()
-        self._pending: Optional[Dict] = None
+        self._pending: List[Dict] = []
+        self._max_pending = max_pending
 
     def push(self, evt: Dict) -> None:
         with self._lock:
             if evt.get("kind") == "__RESET__":
-                self._pending = None
+                self._pending.clear()
                 return
-            self._pending = evt
+            self._pending.append(evt)
+            if len(self._pending) > self._max_pending:
+                self._pending.pop(0)
 
     def clear(self) -> None:
         with self._lock:
-            self._pending = None
+            self._pending.clear()
+
+    def pop_new(self) -> List[Dict]:
+        """Drains and returns every event pushed since the last call, in
+        arrival order."""
+        with self._lock:
+            out, self._pending = self._pending, []
+            return out
 
     def pop(self) -> Optional[Dict]:
+        """Back-compat single-event accessor (oldest pending event, if
+        any) for callers that only care about one event at a time."""
         with self._lock:
-            v, self._pending = self._pending, None
-            return v
+            if not self._pending:
+                return None
+            return self._pending.pop(0)

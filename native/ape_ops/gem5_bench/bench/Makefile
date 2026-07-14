@@ -29,7 +29,14 @@ ARM_M5OP        := $(GEM5_ROOT)/util/m5/src/abi/arm/m5op.S
 
 .PHONY: arm clean
 
-arm: $(BUILD_DIR)/arm/bench_ape1 $(BUILD_DIR)/arm/bench_ape2 $(BUILD_DIR)/arm/bench_ape3
+# bench_apeN measures the avoidance (target-known) workload; search_apeN
+# measures the search-and-rescue exploration workload added to each
+# planner (target undetected -- see bench/src/main.c's APE_BENCH_MODE).
+# Named with a distinct prefix (search_ vs bench_) rather than a suffix
+# so the two pattern rules below can't ambiguously both match the same
+# target filename.
+arm: $(BUILD_DIR)/arm/bench_ape1 $(BUILD_DIR)/arm/bench_ape2 $(BUILD_DIR)/arm/bench_ape3 \
+     $(BUILD_DIR)/arm/search_ape1 $(BUILD_DIR)/arm/search_ape2 $(BUILD_DIR)/arm/search_ape3
 
 $(BUILD_DIR)/arm/bench_ape%: $(COMMON_SRCS) $(ARM_M5OP) $(APE_INC_DIR)/*.h | $(BUILD_DIR)/arm
 	# -marm: this toolchain defaults to Thumb with interworking disabled,
@@ -38,6 +45,9 @@ $(BUILD_DIR)/arm/bench_ape%: $(COMMON_SRCS) $(ARM_M5OP) $(APE_INC_DIR)/*.h | $(B
 	# a near-null PC under gem5's MinorCPU). Force the whole binary to
 	# ARM (A32) mode to avoid the ARM/Thumb interworking boundary entirely.
 	$(ARM_CC) $(COMMON_CFLAGS) -marm -DAPE_BENCH_TARGET=$* $(COMMON_SRCS) $(ARM_M5OP) -o $@ -lm
+
+$(BUILD_DIR)/arm/search_ape%: $(COMMON_SRCS) $(ARM_M5OP) $(APE_INC_DIR)/*.h | $(BUILD_DIR)/arm
+	$(ARM_CC) $(COMMON_CFLAGS) -marm -DAPE_BENCH_TARGET=$* -DAPE_BENCH_MODE=1 $(COMMON_SRCS) $(ARM_M5OP) -o $@ -lm
 
 $(BUILD_DIR)/arm:
 	mkdir -p $@
