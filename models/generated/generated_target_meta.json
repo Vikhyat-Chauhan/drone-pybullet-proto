@@ -1,0 +1,19 @@
+{
+  "name": "target_sphere",
+  "x": 58.58950624065358,
+  "y": 7.495789203409679,
+  "z": 3.0,
+  "radius": 0.6,
+  "color": [
+    1.0,
+    0.9,
+    0.0,
+    1.0
+  ],
+  "in_meta_nofly": "models/generated/generated_nofly_meta.json",
+  "avoid_start_xy": [
+    -95.0,
+    0.0
+  ],
+  "min_dist_start": 150
+}
