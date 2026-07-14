@@ -46,6 +46,12 @@ _CONFIGS_DIR = _GEM5_BENCH_DIR / "configs"
 ITERATIONS = 200
 PLANNERS = ("ape1", "ape2", "ape3")
 
+# Search-and-rescue exploration workload (target undetected -- see
+# bench/src/main.c's APE_BENCH_MODE) measured from the search_apeN
+# binaries (bench/Makefile), a genuinely different workload per planner
+# from the avoidance one above, not just a different input.
+SEARCH_PLANNERS = ("ape1", "ape2", "ape3")
+
 
 def _clock_hz_from_freq_str(freq: str) -> float:
     """Parses a gem5 --cpu-freq string like '168MHz' into Hz."""
@@ -57,7 +63,8 @@ def _clock_hz_from_freq_str(freq: str) -> float:
     raise ValueError(f"unrecognized CPU_FREQ format: {freq!r}")
 
 
-def _render(profile_name: str, study, total_cycles: dict[str, int]) -> str:
+def _render(profile_name: str, study, total_cycles: dict[str, int],
+            total_cycles_search: dict[str, int]) -> str:
     cpu_clock_hz = _clock_hz_from_freq_str(study.CPU_FREQ)
     return f'''"""
 gem5_measured_latencies.py — GENERATED FILE, do not edit by hand.
@@ -76,6 +83,13 @@ not a synthetic op-count proxy. Read directly from each profile's
 stats.txt ROI block (see native/ape_ops/gem5_bench/bench/src/main.c for
 the m5_reset_stats/m5_dump_stats bracketing, against one fixed
 open-corridor scan fixture).
+
+TOTAL_CYCLES_SEARCH is the same measurement for each planner's
+search-and-rescue exploration code path (target undetected, from the
+search_apeN binaries -- see bench/src/main.c's APE_BENCH_MODE and
+nav_algorithm.py's _search_native_plan) -- a genuinely different
+workload per planner (APE2/APE3 also touch their persistent search-state
+grid), not a different input to the same code.
 
 This is the ACTIVE simulated CPU for this repo's power model: it feeds
 both live deadline-feasibility timing (budget_ms, via
@@ -106,6 +120,14 @@ TOTAL_CYCLES: dict[str, int] = {{
     "ape2": {total_cycles["ape2"]},
     "ape3": {total_cycles["ape3"]},
 }}
+
+# Same measurement, search-and-rescue exploration workload (see the
+# module docstring above).
+TOTAL_CYCLES_SEARCH: dict[str, int] = {{
+    "ape1": {total_cycles_search["ape1"]},
+    "ape2": {total_cycles_search["ape2"]},
+    "ape3": {total_cycles_search["ape3"]},
+}}
 '''
 
 
@@ -130,7 +152,20 @@ def main() -> None:
         total_cycles[planner] = parse_num_cycles(stats_path)
         print(f"{planner}: TOTAL_CYCLES = {total_cycles[planner]}")
 
-    rendered = _render(args.profile, study, total_cycles)
+    total_cycles_search: dict[str, int] = {}
+    for planner in SEARCH_PLANNERS:
+        binary = _GEM5_BENCH_DIR / "bench" / "build" / "arm" / f"search_{planner}"
+        if not binary.exists():
+            raise FileNotFoundError(
+                f"{binary} not found — build it first with:\n"
+                f"    GEM5_ROOT=... make -C {_GEM5_BENCH_DIR / 'bench'} arm"
+            )
+        outdir = _GEM5_BENCH_DIR / "out" / "mcu" / args.profile / f"search_{planner}"
+        stats_path = run_study(args.profile, binary, outdir)
+        total_cycles_search[planner] = parse_num_cycles(stats_path)
+        print(f"search_{planner}: TOTAL_CYCLES_SEARCH = {total_cycles_search[planner]}")
+
+    rendered = _render(args.profile, study, total_cycles, total_cycles_search)
 
     out_path = _REPO_ROOT / "gem5_measured_latencies.py"
     out_path.write_text(rendered)

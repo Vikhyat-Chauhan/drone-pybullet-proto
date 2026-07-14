@@ -21,6 +21,10 @@ def yaw_from_quat(x: float, y: float, z: float, w: float) -> float:
     return math.atan2(t0, t1)
 
 
+def _wrap_pi(a: float) -> float:
+    return (a + math.pi) % (2.0 * math.pi) - math.pi
+
+
 @dataclass
 class ScanMsg:
     """Replaces sensor_msgs/LaserScan -- same field names the original
@@ -111,6 +115,46 @@ class StaticPoseProvider:
         return self._xyz
 
 
+class TargetSignalProvider:
+    """Search-and-rescue target sensor: replaces StaticPoseProvider's
+    always-known ground truth with an omnidirectional (RSSI/thermal-style)
+    detection gate. Holds the real target xyz internally (still needed for
+    physically meaningful "reached" checks) but latest() returns None until
+    the drone has come within detect_radius_m of it -- same (x, y, z) return
+    shape as StaticPoseProvider.latest() once detected, so it drops into
+    LidarTargetNavigatorCA's target_pose slot with no changes to
+    nav_algorithm.py's _latest_target()/tick() fallback path.
+
+    Detection is sticky (once_locked): once found, latest() keeps returning
+    the location even if the drone later drifts back outside detect_radius_m,
+    so search/homing mode doesn't flicker.
+    """
+    def __init__(self, xyz: Tuple[float, float, float], pose_provider: PoseProvider,
+                 detect_radius_m: float = math.inf):
+        self._xyz = xyz
+        self._pose = pose_provider
+        self._detect_radius_m = detect_radius_m
+        self._locked = False
+
+    def update(self) -> None:
+        if self._locked:
+            return
+        x, y, z, _yaw = self._pose.latest()
+        dx, dy, dz = self._xyz[0] - x, self._xyz[1] - y, self._xyz[2] - z
+        if math.sqrt(dx * dx + dy * dy + dz * dz) <= self._detect_radius_m:
+            self._locked = True
+
+    def latest(self) -> Optional[Tuple[float, float, float]]:
+        return self._xyz if self._locked else None
+
+    def true_xyz(self) -> Tuple[float, float, float]:
+        """Ground-truth target position, regardless of detection status
+        -- used for metrics (e.g. straight-line distance for
+        path-efficiency) that need the real target even before it's
+        been sensed."""
+        return self._xyz
+
+
 class ScanProvider:
     """Replaces _ScanSub. update() must be called once per sim tick from
     the drive loop; latest() returns the cached (ScanMsg, t_last) pair,
@@ -167,26 +211,89 @@ class CloudProvider:
 
 
 class EventQueue:
-    """Replaces _EventSub + the ROS String pub/sub transport. Preserves
-    _EventSub's exact semantics: only the newest unconsumed event
-    survives (this is NOT a FIFO), push overwrites, pop clears, and a
-    "__RESET__" kind clears without becoming a deliverable event."""
-    def __init__(self):
+    """Multi-slot mailbox for newly-armed threat-arrival events. Used to
+    be a single-slot (last-write-wins) mailbox back when events had no
+    spatial existence and only one could be "in flight" at a time; now
+    that threats.ThreatManager can keep several moving threats active
+    concurrently, push() appends (defensively capped) and pop_new()
+    atomically drains and returns everything pushed since the last call.
+    A "__RESET__" kind still clears the queue without becoming a
+    deliverable event."""
+    def __init__(self, max_pending: int = 16):
         self._lock = threading.Lock()
-        self._pending: Optional[Dict] = None
+        self._pending: List[Dict] = []
+        self._max_pending = max_pending
 
     def push(self, evt: Dict) -> None:
         with self._lock:
             if evt.get("kind") == "__RESET__":
-                self._pending = None
+                self._pending.clear()
                 return
-            self._pending = evt
+            self._pending.append(evt)
+            if len(self._pending) > self._max_pending:
+                self._pending.pop(0)
 
     def clear(self) -> None:
         with self._lock:
-            self._pending = None
+            self._pending.clear()
+
+    def pop_new(self) -> List[Dict]:
+        """Drains and returns every event pushed since the last call, in
+        arrival order."""
+        with self._lock:
+            out, self._pending = self._pending, []
+            return out
 
     def pop(self) -> Optional[Dict]:
+        """Back-compat single-event accessor (oldest pending event, if
+        any) for callers that only care about one event at a time."""
         with self._lock:
-            v, self._pending = self._pending, None
-            return v
+            if not self._pending:
+                return None
+            return self._pending.pop(0)
+
+
+class ThreatSensorProvider:
+    """Proxy 'camera' threat sensor: a forward-facing cone with limited
+    range, modeled on TargetSignalProvider's detection-gate pattern but
+    for moving threats (threats.py::ThreatManager) instead of the
+    search-and-rescue target. update(threats) must be called once per
+    sim tick with the current list of active threats
+    (ThreatManager.active()); latest() returns the subset within
+    range/FOV as {id, range_m, bearing_rad, closing_speed_mps, radius_m}
+    dicts, sorted by ascending range -- threats outside the cone or
+    range are simply invisible until they enter it, which is what makes
+    genuine misses (and a too-slow planner missing a threat already
+    inside the cone) possible.
+
+    closing_speed_mps is computed from the threat's own velocity
+    projected onto the line-of-sight only -- the drone's own velocity
+    doesn't factor in, a deliberate simplification that keeps this a
+    pure per-threat calc instead of a full relative-velocity one."""
+    def __init__(self, pose_provider: PoseProvider, detect_range_m: float, fov_deg: float):
+        self._pose = pose_provider
+        self._range = detect_range_m
+        self._half_fov = math.radians(fov_deg) / 2.0
+        self._visible: List[Dict] = []
+
+    def update(self, threats: List[Dict]) -> None:
+        x, y, _z, yaw = self._pose.latest()
+        out = []
+        for th in threats:
+            dx, dy = th["x"] - x, th["y"] - y
+            rng = math.hypot(dx, dy)
+            if rng > self._range or rng < 1e-6:
+                continue
+            bearing = _wrap_pi(math.atan2(dy, dx) - yaw)
+            if abs(bearing) > self._half_fov:
+                continue
+            closing_speed = -(dx * th["vx"] + dy * th["vy"]) / rng
+            out.append({
+                "id": th["id"], "range_m": rng, "bearing_rad": bearing,
+                "closing_speed_mps": closing_speed, "radius_m": th["radius"],
+            })
+        out.sort(key=lambda d: d["range_m"])
+        self._visible = out
+
+    def latest(self) -> List[Dict]:
+        return self._visible

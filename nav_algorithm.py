@@ -16,11 +16,11 @@
 # Public API:
 #   LidarTargetNavigatorCA.begin_mission()
 #   LidarTargetNavigatorCA.tick(target_xyz=None) -> str
-#       one of: "reached", "no_pose", "no_target", "hard_stale", "running"
-#   LidarTargetNavigatorCA.end_mission() -> (reached, elapsed_s, total_latency_us,
-#       compute_energy_j, events_handled, events_violated,
-#       events_violated_deadline, events_violated_preemptive)
-#   LidarTargetNavigatorCA.go_to(target_xyz=None, timeout_s=None) -> same 8-tuple
+#       one of: "reached", "no_pose", "hard_stale", "running" ("no_target"
+#       retired -- an undetected target now drives search mode instead of
+#       idling, see the tick() docstring)
+#   LidarTargetNavigatorCA.end_mission() -> MissionResult
+#   LidarTargetNavigatorCA.go_to(target_xyz=None, timeout_s=None) -> same MissionResult
 #       (standalone convenience wrapper; advances its own SimClock ticks,
 #       does NOT step PyBullet -- only useful without a real physics body)
 
@@ -38,7 +38,8 @@ from mcu_cycle_model import (
 import ape_native
 from sim_adapters import (
     ScanMsg, sector_min, window_vals, SimClock,
-    PoseProvider, StaticPoseProvider, ScanProvider, CloudProvider, EventQueue,
+    PoseProvider, TargetSignalProvider, ScanProvider, CloudProvider, EventQueue,
+    ThreatSensorProvider,
 )
 
 
@@ -132,36 +133,99 @@ class EventDecisionCfg:
 
     v_cap_frac: float = 0.75
     selector_mode: str = "CA"
-    commit_hold_s: float = 0.9
+    commit_hold_s: float = 0.3
 
     sudden_obj_radius_m: float = 1.2
     sudden_obj_clearance_m: float = 0.3
     sidestep_deg: float = 110.0
     sidestep_speed_frac: float = 0.35
 
+    # In CA mode, which single APE's native search logic drives
+    # exploration while the target is undetected (CA's per-event
+    # avoidance racing across all three is untouched -- this only
+    # decides search-tick behavior). Named/explicit rather than
+    # silently hardcoded, since racing all three search decisions every
+    # tick would be pure compute overhead with no adversarial timing
+    # pressure to justify it (see nav_algorithm.py's _search_native_plan).
+    ca_search_source: str = "APE3"
+
 
 @dataclass
 class ApeAlgoCfg:
-    """Tuning parameters for the native DWA and VFH planners (APE3 and
-    APE2 respectively -- see ape_native.py for the APE2<->APE3 identity
-    swap), plus the multi-layer LiDAR geometry constants (mirrors the
+    """Tuning parameters for the native DWA (APE2) and VFH (APE3)
+    planners, plus the multi-layer LiDAR geometry constants (mirrors the
     original model.sdf's <vertical> block -- kept as plain numbers here
     since there's no SDF in this port)."""
     n_layers: int = 5
     vertical_angle_min: float = -0.0872665   # -5 deg
     vertical_angle_increment: float = 0.0436332  # (2*5deg)/(n_layers-1)
 
-    dwa_n_v: int = 5
-    dwa_n_w: int = 7
+    # Grid/horizon sized to keep APE2's real gem5-measured compute cost
+    # in the "medium" tier -- comfortably above APE1's cheap reflex, but
+    # below APE3/VFH's full multi-layer histogram + predictive-CPA cost
+    # (see native/ape_ops/gem5_bench's frozen measurements). DWA's own
+    # per-step forward-simulation (trig-heavy: cos/sin/atan2 every
+    # simulated step) is the dominant cost driver, not the moving-threat
+    # check added alongside it -- shrinking the candidate grid/horizon is
+    # the intended lever for tuning this tier's cost, not an algorithmic
+    # change.
+    dwa_n_v: int = 3
+    dwa_n_w: int = 3
     dwa_dt: float = 0.3
-    dwa_horizon_s: float = 1.5
+    dwa_horizon_s: float = 0.6
     dwa_w_clear: float = 0.4
     dwa_w_heading: float = 0.4
     dwa_w_speed: float = 0.2
+    dwa_w_threat: float = 2.0
 
     vfh_n_sectors: int = 36
     vfh_threshold: float = 0.3
     vfh_smax_sectors: float = 6.0
+    vfh_w_threat: float = 2.0
+    vfh_threat_horizon_s: float = 2.0
+
+
+@dataclass
+class SearchCfg:
+    """Search-and-rescue persistent-memory grid geometry (ape_search_state_t,
+    see ape_types.h). Both grids cover the same world-frame window (sized
+    to the arena -- ArenaCfg's domain is -100..100m x -50..50m, see
+    config.py/arena.py); APE3's grid is coarser (partial memory, VFH's
+    saturating visited-count bitmap) than APE2's (full memory, DWA's
+    occupancy grid needs real resolution), which is what makes APE3 the
+    cheaper of the two search tiers. grid_w*grid_h must stay <=
+    ape_native.APE_GRID_MAX_CELLS for each."""
+    grid_origin_x: float = -110.0
+    grid_origin_y: float = -60.0
+    grid_world_w_m: float = 220.0
+    grid_world_h_m: float = 120.0
+
+    ape2_grid_w: int = 64
+    ape2_grid_h: int = 32
+
+    ape3_grid_w: int = 12
+    ape3_grid_h: int = 8
+
+
+@dataclass
+class MissionResult:
+    """Returned by end_mission()/go_to(). Grew out of an 8-tuple once
+    search-and-rescue added its own metrics (time_to_detect_s/
+    search_ticks_*) -- a dataclass rather than a wider positional tuple,
+    since callers were already destructuring the tuple positionally and
+    a 12-field one is unreadable at call sites."""
+    reached: bool
+    elapsed_s: float
+    total_latency_us: float
+    compute_energy_j: float
+    events_handled: int
+    events_violated: int
+    events_violated_deadline: int
+    events_violated_preemptive: int
+    time_to_detect_s: Optional[float]      # None if the target was never detected
+    search_ticks_total: int
+    path_length_m: float
+    path_efficiency: float                 # straight_line_dist / path_length_m, 1.0 if undefined
 
 
 class LidarTargetNavigatorCA:
@@ -177,17 +241,19 @@ class LidarTargetNavigatorCA:
                  cfg: TeleopConfig,
                  selector_mode: str,
                  drone_pose: PoseProvider,
-                 target_pose: StaticPoseProvider,
+                 target_pose: TargetSignalProvider,
                  scan: ScanProvider,
                  cloud: CloudProvider,
                  events: EventQueue,
                  sim_clock: SimClock,
+                 threat_sensor: Optional[ThreatSensorProvider] = None,
                  goto_cfg: Optional[GoToConfig] = None,
                  avoid_cfg: Optional[AvoidCfg] = None,
                  crumb_cfg: Optional[BreadcrumbCfg] = None,
                  safety_cfg: Optional[SafetyCfg] = None,
                  risk_cfg: Optional[RiskCfg] = None,
-                 algo_cfg: Optional[ApeAlgoCfg] = None):
+                 algo_cfg: Optional[ApeAlgoCfg] = None,
+                 search_cfg: Optional[SearchCfg] = None):
         self._teleop = teleop
         self._cfg = cfg
         self._gc = goto_cfg or GoToConfig()
@@ -196,9 +262,12 @@ class LidarTargetNavigatorCA:
         self._sc = safety_cfg or SafetyCfg()
         self._rc = risk_cfg or RiskCfg()
         self._algo = algo_cfg or ApeAlgoCfg()
+        self._srch = search_cfg or SearchCfg()
         self._logger = logging.getLogger(__name__)
         self._logger.propagate = True
         self._cycle_meter = McuCycleMeter()
+        self._search_state_ape2 = ape_native.ApeSearchState()
+        self._search_state_ape3 = ape_native.ApeSearchState()
 
         self._events_handled: int = 0
         self._events_violated: int = 0
@@ -211,6 +280,7 @@ class LidarTargetNavigatorCA:
         self._cloud_provider = cloud
         self._evt_queue = events
         self._sim_clock = sim_clock
+        self._threat_sensor = threat_sensor
 
         self._edc = EventDecisionCfg()
         try:
@@ -235,6 +305,13 @@ class LidarTargetNavigatorCA:
         self._avoid_sign = 0
         self._avoid_until = 0.0
 
+        self._search_last_xy: Optional[Tuple[float, float]] = None
+        self._search_dist_traveled: float = 0.0
+
+        self._path_last_xy: Optional[Tuple[float, float]] = None
+        self._path_dist_traveled: float = 0.0
+        self._straight_line_dist_m: float = 0.0
+
         self._crumb_set: Set[Tuple[int,int,int]] = set()
         self._crumb_fifo: Deque[Tuple[int,int,int]] = deque()
         self._side_bias: int = +1
@@ -251,7 +328,6 @@ class LidarTargetNavigatorCA:
         self._evt_deadline_at: float = 0.0
         self._evt_lock = threading.Lock()
         self._evt_proposals: Dict[str, Dict] = {}
-        self._evt_threads: List[threading.Thread] = []
 
         self._evt_active: bool = False
         self._evt_resolved: bool = False
@@ -285,6 +361,9 @@ class LidarTargetNavigatorCA:
 
     def _latest_target(self) -> Optional[Tuple[float, float, float]]:
         return self._target_pose.latest()
+
+    def _visible_threats(self) -> List[Dict]:
+        return self._threat_sensor.latest() if self._threat_sensor is not None else []
 
     def _scan_metrics(self) -> Tuple[float, float, float, bool, Optional[ScanMsg], float]:
         scan, t_last = self._scan_provider.latest()
@@ -397,9 +476,9 @@ class LidarTargetNavigatorCA:
         return min(v_des, vmax)
 
     # ---------- event planners ----------
-    def _evt_put(self, name, v, wz, vz, score):
+    def _evt_put(self, name, v, wz, vz, score, ready_t):
         with self._evt_lock:
-            self._evt_proposals[name] = {"v": v, "wz": wz, "vz": vz, "score": score, "ready_t": self._sim_time()}
+            self._evt_proposals[name] = {"v": v, "wz": wz, "vz": vz, "score": score, "ready_t": ready_t}
 
     def _build_ape_params(self, snap, multilayer: bool) -> ape_native.ApeParams:
         """Marshals the raw scan + scalar nav state + relevant config into
@@ -447,6 +526,10 @@ class LidarTargetNavigatorCA:
 
         p.v_cmd = float(snap["v_cmd"])
         p.yaw_err = float(snap["yaw_err"])
+        p.target_detected = 1 if snap.get("target_detected", True) else 0
+        p.drone_x = float(snap.get("drone_x", 0.0))
+        p.drone_y = float(snap.get("drone_y", 0.0))
+        p.drone_yaw = float(snap.get("drone_yaw", 0.0))
 
         p.max_v = self._gc.max_v
         p.max_wz = self._gc.max_wz
@@ -477,38 +560,92 @@ class LidarTargetNavigatorCA:
         p.vfh_threshold = self._algo.vfh_threshold
         p.vfh_smax_sectors = self._algo.vfh_smax_sectors
 
+        threats = sorted(snap.get("threats", []) or [],
+                          key=lambda d: d.get("range_m", float("inf")))[:ape_native.APE_MAX_THREATS]
+        for i in range(ape_native.APE_MAX_THREATS):
+            if i < len(threats):
+                th = threats[i]
+                p.threats[i].active = 1
+                p.threats[i].range_m = float(th["range_m"])
+                p.threats[i].bearing_rad = float(th["bearing_rad"])
+                p.threats[i].closing_speed_mps = float(th["closing_speed_mps"])
+                p.threats[i].radius_m = float(th["radius_m"])
+            else:
+                p.threats[i].active = 0
+        p.n_threats = len(threats)
+        p.dwa_w_threat = self._algo.dwa_w_threat
+        p.vfh_w_threat = self._algo.vfh_w_threat
+        p.vfh_threat_horizon_s = self._algo.vfh_threat_horizon_s
+
         return p
 
-    def _evt_native_plan_and_topup(self, plan_fn, params: ape_native.ApeParams, budget_ms: float):
-        """Calls the real native planner (genuine compute, releases the
-        GIL), then tops up with a sleep to reach the nominal gem5-derived
-        budget_ms. This top-up stays on wall-clock time.perf_counter()/
-        time.sleep() deliberately -- it emulates real MCU compute latency,
-        not sim time, so it's independent of SimClock."""
-        t0 = time.perf_counter()
-        result = plan_fn(params)
-        elapsed_s = time.perf_counter() - t0
-        time.sleep(max(0.0, budget_ms / 1000.0 - elapsed_s))
-        return result
-
-    def _evt_plan_ape1(self, snap, budget_ms):
+    def _evt_plan_ape1(self, snap, budget_ms, arrival_sim_t):
+        """Calls the real native planner synchronously (genuine compute,
+        actual wall-clock cost is microseconds per the gem5 measurements)
+        and schedules the proposal's availability in SIM time --
+        ready_t = arrival_sim_t + budget_ms/1000 -- rather than emulating
+        the gem5-measured MCU latency via a real wall-clock sleep on a
+        background thread. A wall-clock sleep can't be made to reliably
+        represent a few-millisecond budget once the outer loop is
+        running unthrottled (headless batch mode advances SimClock tens
+        of times faster than real time, and GIL/thread-scheduling
+        latency alone can dwarf the intended sleep), whereas scheduling
+        readiness against SimClock is exact and deterministic regardless
+        of how fast the sim is actually running -- and identical in GUI
+        mode, where SimClock is paced to real time anyway."""
         params = self._build_ape_params(snap, multilayer=False)
-        r = self._evt_native_plan_and_topup(ape_native.plan_ape1, params, budget_ms)
-        return self._evt_put("APE1", r.v, r.wz, r.vz, r.score)
+        r = ape_native.plan_ape1(params)
+        ready_t = arrival_sim_t + max(0.0, budget_ms) / 1000.0
+        return self._evt_put("APE1", r.v, r.wz, r.vz, r.score, ready_t)
 
-    def _evt_plan_ape2(self, snap, budget_ms):
-        # APE2 = VFH (native_api.c's ape_native_plan_ape2); needs the
-        # multilayer scan its polar histogram bins over.
-        params = self._build_ape_params(snap, multilayer=True)
-        r = self._evt_native_plan_and_topup(ape_native.plan_ape2, params, budget_ms)
-        return self._evt_put("APE2", r.v, r.wz, r.vz, r.score)
-
-    def _evt_plan_ape3(self, snap, budget_ms):
-        # APE3 = DWA (native_api.c's ape_native_plan_ape3); single-layer
+    def _evt_plan_ape2(self, snap, budget_ms, arrival_sim_t):
+        # APE2 = DWA (native_api.c's ape_native_plan_ape2); single-layer
         # scan is sufficient for its forward-simulated candidate scoring.
         params = self._build_ape_params(snap, multilayer=False)
-        r = self._evt_native_plan_and_topup(ape_native.plan_ape3, params, budget_ms)
-        return self._evt_put("APE3", r.v, r.wz, r.vz, r.score)
+        r = ape_native.plan_ape2(params)
+        ready_t = arrival_sim_t + max(0.0, budget_ms) / 1000.0
+        return self._evt_put("APE2", r.v, r.wz, r.vz, r.score, ready_t)
+
+    def _evt_plan_ape3(self, snap, budget_ms, arrival_sim_t):
+        # APE3 = VFH (native_api.c's ape_native_plan_ape3); needs the
+        # multilayer scan its polar histogram bins over.
+        params = self._build_ape_params(snap, multilayer=True)
+        r = ape_native.plan_ape3(params)
+        ready_t = arrival_sim_t + max(0.0, budget_ms) / 1000.0
+        return self._evt_put("APE3", r.v, r.wz, r.vz, r.score, ready_t)
+
+    # ---------- search (target undetected) ----------
+    def _search_native_plan(self, scan: Optional[ScanMsg],
+                             x: float, y: float, yaw: float) -> Tuple[float, float, float]:
+        """Synchronous per-tick search/exploration call into whichever
+        APE is active this run (CA mode delegates to edc.ca_search_source
+        -- see its docstring). No thread, no budget-sleep top-up: unlike
+        obstacle-event avoidance, there's no other planner racing this
+        decision, so it just runs and returns. APE2/APE3 carry their
+        persistent search-state grid (allocated in begin_mission()); APE1
+        never gets one -- no memory, by design."""
+        name = self._edc.selector_mode
+        if name not in ("APE1", "APE2", "APE3"):
+            name = self._edc.ca_search_source
+        snap = {
+            "v_cmd": self._gc.max_v,
+            "scan": scan,
+            "yaw_err": 0.0,
+            "cloud": self._cloud_provider.latest(),
+            "target_detected": False,
+            "drone_x": x, "drone_y": y, "drone_yaw": yaw,
+            "threats": self._visible_threats(),
+        }
+        params = self._build_ape_params(snap, multilayer=(name == "APE3"))
+        if name == "APE1":
+            r = ape_native.plan_ape1(params)
+        elif name == "APE2":
+            r = ape_native.plan_ape2(params, self._search_state_ape2)
+        else:
+            r = ape_native.plan_ape3(params, self._search_state_ape3)
+        self._cycle_meter.record_tick(name)
+        self._search_ticks_total += 1
+        return r.v, r.wz, r.vz
 
     # ---------- event helpers ----------
     def _evt_deadline_feasible(self, deadline_s: float) -> bool:
@@ -531,10 +668,6 @@ class LidarTargetNavigatorCA:
     def _evt_clear(self):
         with self._evt_lock:
             self._evt_proposals.clear()
-        for t in self._evt_threads:
-            if t.is_alive():
-                t.join(timeout=0.002)
-        self._evt_threads.clear()
         self._pending_evt = None
         self._evt_deadline_at = 0.0
         self._evt_active = False
@@ -565,7 +698,7 @@ class LidarTargetNavigatorCA:
                 with self._evt_lock:
                     self._evt_proposals.pop(name, None)
                 t0 = time.perf_counter()
-                fn(_snap, 0)
+                fn(_snap, 0, 0.0)
                 times_ms.append((time.perf_counter() - t0) * 1000.0)
             results[name] = {
                 "mean": statistics.mean(times_ms),
@@ -603,16 +736,48 @@ class LidarTargetNavigatorCA:
         self._progress_t0 = None
         self._progress_d0 = None
         self._escape_until = 0.0
+        self._search_last_xy = None
+        self._search_dist_traveled = 0.0
+        self._path_last_xy = None
+        self._path_dist_traveled = 0.0
+        dpose0 = self._latest_drone()
+        if dpose0 is not None:
+            tx0, ty0, _tz0 = self._target_pose.true_xyz()
+            self._straight_line_dist_m = math.hypot(tx0 - dpose0[0], ty0 - dpose0[1])
+        else:
+            self._straight_line_dist_m = 0.0
+        self._time_to_detect_s = None
+        self._search_ticks_total = 0
+        cell_w2 = self._srch.grid_world_w_m / max(1, self._srch.ape2_grid_w)
+        cell_h2 = self._srch.grid_world_h_m / max(1, self._srch.ape2_grid_h)
+        ape_native.reset_search_state(
+            self._search_state_ape2, self._srch.ape2_grid_w, self._srch.ape2_grid_h,
+            max(cell_w2, cell_h2), self._srch.grid_origin_x, self._srch.grid_origin_y)
+        cell_w3 = self._srch.grid_world_w_m / max(1, self._srch.ape3_grid_w)
+        cell_h3 = self._srch.grid_world_h_m / max(1, self._srch.ape3_grid_h)
+        ape_native.reset_search_state(
+            self._search_state_ape3, self._srch.ape3_grid_w, self._srch.ape3_grid_h,
+            max(cell_w3, cell_h3), self._srch.grid_origin_x, self._srch.grid_origin_y)
         self._evt_clear()
 
-    def end_mission(self, reached: bool) -> Tuple[bool, float, float, float, int, int, int, int]:
+    def end_mission(self, reached: bool) -> MissionResult:
         self._teleop.stop()
         elapsed = self._sim_time() - self._t_start
         total_latency_us, _ = self._cycle_meter.end()
         compute_energy_j = latency_to_energy_j(total_latency_us, elapsed)
-        return (reached, elapsed, total_latency_us, compute_energy_j,
-                self._events_handled, self._events_violated,
-                self._events_violated_deadline, self._events_violated_preemptive)
+        path_length_m = self._path_dist_traveled
+        # Clamped to 1.0: "reached" fires within goal_radius_m of the
+        # target, not at its exact center, so a very direct path can
+        # legitimately finish slightly short of straight_line_dist_m --
+        # that's still perfect efficiency, not "better than straight line".
+        path_efficiency = min(1.0, self._straight_line_dist_m / path_length_m) if path_length_m > 1e-6 else 1.0
+        return MissionResult(
+            reached, elapsed, total_latency_us, compute_energy_j,
+            self._events_handled, self._events_violated,
+            self._events_violated_deadline, self._events_violated_preemptive,
+            self._time_to_detect_s, self._search_ticks_total,
+            path_length_m, path_efficiency,
+        )
 
     # ---------- core: one decision-loop iteration ----------
     def tick(self, target_xyz: Optional[Tuple[float, float, float]] = None) -> str:
@@ -620,7 +785,12 @@ class LidarTargetNavigatorCA:
         owns time advancement (SimClock.tick(), p.stepSimulation(),
         teleop.physics_step()) -- this method only computes and issues one
         velocity command via self._teleop.set_cmd(). Returns a status
-        string: "reached" | "no_pose" | "no_target" | "hard_stale" | "running"."""
+        string: "reached" | "no_pose" | "hard_stale" | "running". If the
+        target hasn't been detected yet (target_xyz is None and the wired
+        target_pose provider's latest() also returns None), this issues a
+        search/exploration command instead of idling -- "reached" can only
+        occur after detection, since it's computed from real target
+        coordinates."""
         rate = max(1.0, float(self._gc.rate_hz))
         dt = 1.0 / rate
 
@@ -628,47 +798,82 @@ class LidarTargetNavigatorCA:
         if dpose is None:
             return "no_pose"
 
-        if target_xyz is None:
-            tpose = self._latest_target()
-            if tpose is None:
-                self._teleop.set_cmd(0.0, 0.0, 0.0, 0.0)
-                return "no_target"
-            tx, ty, tz = tpose
-        else:
-            tx, ty, tz = target_xyz
-
+        tpose = target_xyz if target_xyz is not None else self._latest_target()
         x, y, z, yaw = dpose
-        ex, ey, ez = (tx - x), (ty - y), (tz - z)
-        dist_xy = math.hypot(ex, ey)
-        dist = math.sqrt(ex*ex + ey*ey + ez*ez)
 
-        if not self._nav_start_logged:
-            self._log("POSES", type="POSES",
-                      nav_start_drone_pose=(x, y, z, yaw),
-                      nav_start_target=(tx, ty, tz),
-                      nav_start_dist_m=round(dist, 3),
-                      nav_start_dist_xy_m=round(dist_xy, 3))
-            self._nav_start_logged = True
-
-        if dist <= self._gc.goal_radius_m:
-            return "reached"
-
-        # ---------- Base go-to ----------
-        hdg_des = math.atan2(ey, ex)
-        yaw_err = _wrap_pi(hdg_des - yaw)
-
-        v_cmd  = min(self._gc.max_v, self._gc.kp_lin * dist_xy)
-        if abs(yaw_err) > self._gc.slow_yaw_threshold:
-            v_cmd = min(v_cmd, self._gc.edge_guard_scale * self._gc.max_v)
-
-        vz_cmd = max(-self._gc.max_vz, min(self._gc.max_vz, self._gc.kp_z * ez))
-        wz_cmd = max(-self._gc.max_wz, min(self._gc.max_wz, self._gc.kp_yaw * yaw_err))
-
+        # ---------- Full-mission path-length tracking (path_efficiency) ----------
+        if self._path_last_xy is not None:
+            self._path_dist_traveled += math.hypot(x - self._path_last_xy[0], y - self._path_last_xy[1])
+        self._path_last_xy = (x, y)
+        target_detected = tpose is not None
+        if target_detected and self._time_to_detect_s is None:
+            self._time_to_detect_s = self._sim_time() - self._t_start
         front, left, right, stale, scan, now = self._scan_metrics()
 
+        if tpose is None:
+            # ---------- Search mode (target not yet detected) ----------
+            # No known goal to steer at -- issue an exploration command
+            # instead of idling, computed by the active APE's own native
+            # search logic (each APE branches on target_detected, see
+            # native/ape_ops/src/ape{1_bug,2_dwa,3_vfh}.c). Unlike
+            # obstacle-event avoidance calls below, this runs synchronously
+            # every tick with no thread/deadline race -- there's no
+            # adversarial timing pressure to race against here.
+            if self._search_last_xy is not None:
+                dx = x - self._search_last_xy[0]
+                dy = y - self._search_last_xy[1]
+                self._search_dist_traveled += math.hypot(dx, dy)
+            self._search_last_xy = (x, y)
+
+            v_cmd, wz_cmd, vz_cmd = self._search_native_plan(scan, x, y, yaw)
+            yaw_err = 0.0  # placeholder; native code ignores it (target_detected=0)
+            ez = 0.0
+            ex, ey = math.cos(yaw), math.sin(yaw)
+            # Monotonically non-increasing proxy for the progress watchdog
+            # below (there's no target distance to shrink yet) -- gained
+            # progress == actual distance traveled while searching.
+            dist = -self._search_dist_traveled
+        else:
+            tx, ty, tz = tpose
+            ex, ey, ez = (tx - x), (ty - y), (tz - z)
+            dist_xy = math.hypot(ex, ey)
+            dist = math.sqrt(ex*ex + ey*ey + ez*ez)
+
+            if not self._nav_start_logged:
+                self._log("POSES", type="POSES",
+                          nav_start_drone_pose=(x, y, z, yaw),
+                          nav_start_target=(tx, ty, tz),
+                          nav_start_dist_m=round(dist, 3),
+                          nav_start_dist_xy_m=round(dist_xy, 3))
+                self._nav_start_logged = True
+
+            if dist <= self._gc.goal_radius_m:
+                return "reached"
+
+            # ---------- Base go-to ----------
+            hdg_des = math.atan2(ey, ex)
+            yaw_err = _wrap_pi(hdg_des - yaw)
+
+            v_cmd  = min(self._gc.max_v, self._gc.kp_lin * dist_xy)
+            if abs(yaw_err) > self._gc.slow_yaw_threshold:
+                v_cmd = min(v_cmd, self._gc.edge_guard_scale * self._gc.max_v)
+
+            vz_cmd = max(-self._gc.max_vz, min(self._gc.max_vz, self._gc.kp_z * ez))
+            wz_cmd = max(-self._gc.max_wz, min(self._gc.max_wz, self._gc.kp_yaw * yaw_err))
+
         # ---- Event intake ----
-        evt = self._evt_queue.pop()
-        if evt is not None:
+        # Multiple threats can now be spawned concurrently (ThreatManager
+        # allows overlap up to max_active_threats), so a tick may see
+        # more than one newly-armed arrival -- process them in order
+        # through the same single-active-race logic as before (a new
+        # arrival while a race is in flight salvages/preempts it exactly
+        # like a single-slot queue used to). The race itself is already
+        # threat-aware for every currently sensor-visible threat (not
+        # just the one that triggered it) via _build_ape_params' threats
+        # snapshot below, since ape_params_t.threats[] carries up to
+        # APE_MAX_THREATS at once -- so a single winning proposal already
+        # reflects avoidance of everything currently in view.
+        for evt in self._evt_queue.pop_new():
             deadline_s = max(0.0, float(evt.get("deadline_s", 0.0)))
             self._log("EVENT", type="ARRIVAL",
                       t_rec=evt["t_recv"],
@@ -677,8 +882,9 @@ class LidarTargetNavigatorCA:
             self._events_handled += 1
 
             if self._evt_active:
+                now_t = self._sim_time()
                 with self._evt_lock:
-                    ready_curr = dict(self._evt_proposals)
+                    ready_curr = {n: p for n, p in self._evt_proposals.items() if now_t >= p["ready_t"]}
                 salvage_order = self._evt_cascade_order()
                 chosen_curr = next(
                     ((n, ready_curr[n]) for n in salvage_order if n in ready_curr),
@@ -715,35 +921,31 @@ class LidarTargetNavigatorCA:
 
                 with self._evt_lock:
                     self._evt_proposals = {}
-                for t in self._evt_threads:
-                    if t.is_alive():
-                        t.join(timeout=0.001)
-                self._evt_threads = []
 
                 snap = {
                     "v_cmd": v_cmd,
                     "scan": scan,
                     "yaw_err": _wrap_pi(math.atan2(ey, ex) - yaw),
                     "cloud": self._cloud_provider.latest(),
+                    "target_detected": target_detected,
+                    "drone_x": x, "drone_y": y, "drone_yaw": yaw,
+                    "threats": self._visible_threats(),
                 }
 
+                # Each planner's real (fast) native call runs
+                # synchronously here; its proposal's *availability* is
+                # scheduled in sim-time (ready_t, set inside
+                # _evt_plan_apeN) rather than emulated via a real
+                # wall-clock sleep on a background thread -- see
+                # _evt_plan_ape1's docstring for why.
                 mode = self._edc.selector_mode
-                threads = []
+                arrival_sim_t = self._sim_time()
                 if mode in ("CA", "APE1"):
-                    threads.append(threading.Thread(
-                        target=self._evt_plan_ape1,
-                        args=(snap, self._edc.ape1_budget_ms), daemon=True))
+                    self._evt_plan_ape1(snap, self._edc.ape1_budget_ms, arrival_sim_t)
                 if mode in ("CA", "APE2"):
-                    threads.append(threading.Thread(
-                        target=self._evt_plan_ape2,
-                        args=(snap, self._edc.ape2_budget_ms), daemon=True))
+                    self._evt_plan_ape2(snap, self._edc.ape2_budget_ms, arrival_sim_t)
                 if mode in ("CA", "APE3"):
-                    threads.append(threading.Thread(
-                        target=self._evt_plan_ape3,
-                        args=(snap, self._edc.ape3_budget_ms), daemon=True))
-                self._evt_threads = threads
-                for t in self._evt_threads:
-                    t.start()
+                    self._evt_plan_ape3(snap, self._edc.ape3_budget_ms, arrival_sim_t)
 
         event_active = self._evt_active and (self._pending_evt is not None)
 
@@ -786,9 +988,10 @@ class LidarTargetNavigatorCA:
 
         # ---------- Event window — opportunistic best-available selector ----------
         if event_active:
-            tl = max(0.0, self._evt_deadline_at - self._sim_time())
+            now_t = self._sim_time()
+            tl = max(0.0, self._evt_deadline_at - now_t)
             with self._evt_lock:
-                ready = dict(self._evt_proposals)
+                ready = {n: p for n, p in self._evt_proposals.items() if now_t >= p["ready_t"]}
 
             cascade = self._evt_cascade_order()
             best_ready = next(((n, ready[n]) for n in cascade if n in ready), None)
@@ -940,7 +1143,7 @@ class LidarTargetNavigatorCA:
     # ---------- standalone convenience wrapper ----------
     def go_to(self,
               target_xyz: Optional[Tuple[float, float, float]] = None,
-              timeout_s: Optional[float] = None) -> Tuple[bool, float, float, float, int, int, int, int]:
+              timeout_s: Optional[float] = None) -> MissionResult:
         """Convenience wrapper for standalone use without a real PyBullet
         drive loop -- advances its own SimClock ticks and sleeps dt in
         real time, but does NOT call p.stepSimulation(). Not used by

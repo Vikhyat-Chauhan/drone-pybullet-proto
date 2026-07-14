@@ -65,3 +65,27 @@ float ape_stopping_limited_speed(float v_des, float dmin, float max_decel_mps2, 
     float vmax = sqrtf(inner);
     return (v_des < vmax) ? v_des : vmax;
 }
+
+int32_t ape_grid_index(const ape_search_state_t *s, float x, float y) {
+    if (s == NULL || !s->initialized || s->grid_w <= 0 || s->grid_h <= 0 || s->cell_size_m <= 0.0f)
+        return -1;
+    int32_t cx = (int32_t)floorf((x - s->origin_x) / s->cell_size_m);
+    int32_t cy = (int32_t)floorf((y - s->origin_y) / s->cell_size_m);
+    if (cx < 0 || cx >= s->grid_w || cy < 0 || cy >= s->grid_h)
+        return -1;
+    return cy * s->grid_w + cx;
+}
+
+#define APE_TTC_INF 1.0e6f
+
+float ape_threat_time_to_collision(float range_m, float closing_speed_mps) {
+    if (closing_speed_mps > 1e-3f && range_m > 0.0f) {
+        return range_m / closing_speed_mps;
+    }
+    return APE_TTC_INF;
+}
+
+float ape_threat_angular_half_width(float range_m, float radius_m, float vehicle_radius_m) {
+    float r = (range_m > 0.5f) ? range_m : 0.5f;
+    return atan2f(radius_m + vehicle_radius_m, r);
+}

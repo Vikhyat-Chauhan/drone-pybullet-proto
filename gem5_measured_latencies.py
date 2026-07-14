@@ -16,6 +16,13 @@ stats.txt ROI block (see native/ape_ops/gem5_bench/bench/src/main.c for
 the m5_reset_stats/m5_dump_stats bracketing, against one fixed
 open-corridor scan fixture).
 
+TOTAL_CYCLES_SEARCH is the same measurement for each planner's
+search-and-rescue exploration code path (target undetected, from the
+search_apeN binaries -- see bench/src/main.c's APE_BENCH_MODE and
+nav_algorithm.py's _search_native_plan) -- a genuinely different
+workload per planner (APE2/APE3 also touch their persistent search-state
+grid), not a different input to the same code.
+
 This is the ACTIVE simulated CPU for this repo's power model: it feeds
 both live deadline-feasibility timing (budget_ms, via
 mcu_cycle_model.APE_LATENCY_US) and compute-energy accounting (via
@@ -41,7 +48,15 @@ SLEEP_MA = 59.0
 # Total simulated cycles across ITERATIONS invocations, ROI-only
 # (process/loader startup excluded).
 TOTAL_CYCLES: dict[str, int] = {
-    "ape1": 220528,
-    "ape2": 4776216,
-    "ape3": 15707771,
+    "ape1": 239744,
+    "ape2": 2459142,
+    "ape3": 5092720,
+}
+
+# Same measurement, search-and-rescue exploration workload (see the
+# module docstring above).
+TOTAL_CYCLES_SEARCH: dict[str, int] = {
+    "ape1": 223062,
+    "ape2": 12345637,
+    "ape3": 5221102,
 }

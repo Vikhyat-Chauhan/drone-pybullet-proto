@@ -72,23 +72,42 @@ whichever chip the cycle counts were actually measured against — see §3.
 
 ### Is this realistic for avoiding a sudden incoming object?
 
-At 168 MHz, `budget_ms` (`DEADLINE_SCALE=1000` applied per §3 methodology)
-comes out to roughly **APE1 ≈ 6.6 ms, APE2 ≈ 142 ms, APE3 ≈ 467 ms**.
-Published UAV obstacle-avoidance literature gives a useful sanity check:
-Falanga, Kim & Scaramuzza (*Dynamic obstacle avoidance for quadrotors
-with event cameras*, Science Robotics, 2020) report that "today's
-autonomous drones have reaction times of tens of milliseconds," and cite
-field measurements putting UAS at typical cruise speeds (10-15 m/s) under
-roughly a 500 ms total detect→classify→respond budget before a collision
-becomes unavoidable. APE1's ~6.6 ms budget sits comfortably inside that
-window; APE3's ~467 ms budget consumes nearly all of it, leaving almost
-no margin for sensing/classification latency ahead of it. This is a real
-finding, not just a number: it's the concrete justification for this
-sim's APE1/2/3 racing-selector design (cascade through faster, lower-
-quality planners as the deadline tightens, rather than always waiting for
-the highest-quality one) — at a realistic clock speed, the slow planner
-alone can burn through almost the entire literature-cited reaction-time
-budget.
+The raw gem5 numbers alone are not the realistic figure here. An idle
+Cortex-M4 running only the APE call would clear even APE3's raw budget
+(~152 µs) trivially against this sim's 147-650 ms threat deadlines —
+neither ISR entry (tens of ns) nor a full FreeRTOS scheduling tick
+(~1 ms) comes close to mattering at that timescale. Taken bare-metal, the
+deadline race would be moot: APE3 would win essentially every time.
+
+`DEADLINE_SCALE=1000` (`mcu_cycle_model.py`) is therefore not a
+bare-metal hardware-overhead figure — it's a deliberate **CPU-contention
+stress multiplier**, modeling the APE call sharing the one flight-
+controller core with everything else this class of MCU runs without a
+separate companion computer (sensor fusion/filtering, telemetry, the
+motor-mixer control loop, other RTOS tasks) instead of running alone.
+That contention level is asserted, not measured — this sim doesn't model
+those other tasks directly — and is the actual free modeling parameter
+here, not the underlying gem5 cycle counts.
+
+At `DEADLINE_SCALE=1000`, `budget_ms` comes out to roughly **APE1 ≈
+7.1 ms, APE2 ≈ 73.2 ms, APE3 ≈ 151.6 ms**. Published UAV
+obstacle-avoidance literature gives a useful sanity check for whether
+that's a *plausible* contention level, not a proof of it: Falanga, Kim &
+Scaramuzza (*Dynamic obstacle avoidance for quadrotors with event
+cameras*, Science Robotics, 2020) report that "today's autonomous drones
+have reaction times of tens of milliseconds," and cite field measurements
+putting UAS at typical cruise speeds (10-15 m/s) under roughly a 500 ms
+total detect→classify→respond budget before a collision becomes
+unavoidable. APE1's ~7.1 ms budget sits comfortably inside that window;
+APE3's ~151.6 ms budget consumes a meaningful fraction of it, leaving
+less margin for sensing/classification latency ahead of it. That's the
+concrete justification for this sim's APE1/2/3 racing-selector design
+(cascade through faster, lower-quality planners as the deadline tightens,
+rather than always waiting for the highest-quality one) — under a
+plausible contended-CPU scenario, the slow planner alone can burn through
+a meaningful share of the literature-cited reaction-time budget. Under a
+bare-metal (uncontended) assumption instead, this justification
+evaporates — see `mcu_cycle_model.py`'s `DEADLINE_SCALE` comment.
 
 ## 2. Propulsion power (`analysis/power_estimate.py`)
 

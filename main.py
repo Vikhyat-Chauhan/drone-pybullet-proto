@@ -25,7 +25,7 @@ import shutil
 import subprocess
 import sys
 import time
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import pybullet as p
 import pybullet_data
@@ -39,7 +39,10 @@ from hud_overlay import MetricsOverlay
 from lidar import Lidar2D
 from config import TeleopConfig
 from teleop import PyTeleop
-from sim_adapters import SimClock, PoseProvider, StaticPoseProvider, ScanProvider, CloudProvider, EventQueue
+from sim_adapters import (
+    SimClock, PoseProvider, TargetSignalProvider, ScanProvider, CloudProvider,
+    EventQueue, ThreatSensorProvider,
+)
 from nav_algorithm import LidarTargetNavigatorCA
 
 # Explicit (not __name__) so this stays "main" whether run as __main__ or
@@ -47,9 +50,10 @@ from nav_algorithm import LidarTargetNavigatorCA
 # path keys off this exact logger name for its terminator record.
 _main_logger = logging.getLogger("main")
 from mcu_cycle_model import latency_to_energy_j
-from event_source import EventEmitter, EventCfg
+from threats import ThreatManager, ThreatCfg
 from violations import ViolationMonitor
 from energy_monitor import EnergyMonitor
+from crash_monitor import CrashMonitor
 from applog.async_logger import setup_async_logger, AsyncLoggerCfg
 from analysis.statistics_analyzer import run_analysis
 
@@ -65,6 +69,8 @@ CSV_FIELDNAMES = [
     "propulsion_energy_j", "propulsion_mean_power_w",
     "events_handled", "event_violated", "event_violated_deadline",
     "event_violated_preemptive", "event_violation_rate",
+    "time_to_detect_s", "search_ticks_total",
+    "crash_count", "path_length_m", "path_efficiency",
 ]
 
 
@@ -294,90 +300,53 @@ def make_start_marker(start_xy, flight_z):
                         lineColorRGB=START_MARKER_RGB, lineWidth=2.0, lifeTime=0)
 
 
-# Event markers are visual-only timing/kind cues, NOT literal obstacles the
-# nav logic is computed to avoid: in this codebase (as in the original),
-# a deterministic-mode event carries no world position at all --
-# EventEmitter._emit() only ever produces {kind, t_emit, deadline_s,
-# meta: {i, kind}} (event_source.py). nav_algorithm.py's reaction to an
-# event is a timing-pressure race (APE1/2/3 re-plan against whatever the
-# LiDAR *already* sees), not a reaction to a new object at a specific
-# spot. These markers exist so an event's kind/timing is visible and
-# correlates with the drone's reaction -- they spawn a plausible stand-in
-# distance ahead of the drone, not a location the nav actually used.
-EVENT_MARKER_SPECS = {
-    # kind -> (shapeType, shape_kwargs, rgb)
-    "ENEMY": (p.GEOM_SPHERE, {"radius": 0.9}, [0.95, 0.1, 0.1]),
-    "SUDDEN_OBSTACLE": (p.GEOM_CYLINDER, {"radius": 0.7, "length": 2.2}, [1.0, 0.55, 0.0]),
-    "LANE_BLOCK": (p.GEOM_BOX, {"halfExtents": [3.5, 0.3, 1.0]}, [0.95, 0.9, 0.1]),
+# Threat markers are a small reusable pool of generic sphere bodies
+# (visual-only, no collision shape) that follow real threats.Threat
+# positions every tick -- unlike the old purely-timing events (which had
+# no world position at all and only ever got a one-shot jittered
+# stand-in placement), threats.py's Threat objects are real moving
+# objects with a lifetime spanning many ticks, so a small pool matching
+# max_active_threats is reused across whichever threats are currently
+# active instead of one-per-kind, avoiding per-tick createMultiBody/
+# removeBody churn.
+THREAT_MARKER_RADIUS_M = 0.8
+THREAT_KIND_RGB = {
+    "ENEMY": [0.95, 0.1, 0.1],
+    "SUDDEN_OBSTACLE": [1.0, 0.55, 0.0],
+    "LANE_BLOCK": [0.95, 0.9, 0.1],
 }
-EVENT_MARKER_AHEAD_M = 7.0       # plausible stand-in distance ahead of the drone
-EVENT_MARKER_BEARING_JITTER_DEG = 25.0
-EVENT_MARKER_VISIBLE_S = 1.5     # auto-hide if nothing supersedes it
 
 
-def make_event_markers() -> Dict[str, int]:
-    """Pre-create one body per event kind, once per attempt, starting
-    fully transparent (alpha 0) and with no collision shape at all --
-    "initially not physically interacting with the world." Only alpha and
-    position are ever touched afterward (update_event_marker), so there's
-    no per-event createMultiBody/removeBody churn -- the same reasoning
-    already applied to the LiDAR debug-ray fix earlier this session
-    (avoid unthrottled per-tick object churn)."""
-    markers: Dict[str, int] = {}
-    for kind, (shape_type, kwargs, rgb) in EVENT_MARKER_SPECS.items():
-        vis = p.createVisualShape(shape_type, rgbaColor=rgb + [0.0], **kwargs)
-        markers[kind] = p.createMultiBody(baseMass=0, baseVisualShapeIndex=vis, basePosition=[0, 0, -50])
+def make_event_markers(pool_size: int) -> List[int]:
+    markers: List[int] = []
+    for _ in range(max(1, pool_size)):
+        vis = p.createVisualShape(p.GEOM_SPHERE, radius=THREAT_MARKER_RADIUS_M, rgbaColor=[1.0, 1.0, 1.0, 0.0])
+        markers.append(p.createMultiBody(baseMass=0, baseVisualShapeIndex=vis, basePosition=[0, 0, -50]))
     return markers
 
 
-def hide_event_markers(markers: Dict[str, int]) -> None:
-    for kind, body in markers.items():
-        rgb = EVENT_MARKER_SPECS[kind][2]
-        p.changeVisualShape(body, -1, rgbaColor=rgb + [0.0])
+def hide_event_markers(markers: List[int]) -> None:
+    for body in markers:
+        p.changeVisualShape(body, -1, rgbaColor=[1.0, 1.0, 1.0, 0.0])
 
 
-def update_event_marker(markers: Dict[str, int], emitter, last_seen_seq: int,
-                         drone_pos, drone_yaw: float, sim_now: float, hide_at: list) -> int:
-    """Call every loop iteration (not throttled -- period must stay <=
-    EventCfg.dt_min_s so a fast burst of events never skips a visible
-    marker). hide_at is a 1-element list used as a mutable float cell.
-    Returns the new last_seen_seq."""
-    if emitter.last_emit_seq > last_seen_seq:
-        last_seen_seq = emitter.last_emit_seq
-        evt = emitter.last_event
-        kind = evt["kind"] if evt else None
-        if kind in markers:
-            bearing = drone_yaw + math.radians(random.uniform(-EVENT_MARKER_BEARING_JITTER_DEG,
-                                                                EVENT_MARKER_BEARING_JITTER_DEG))
-            mx = drone_pos[0] + EVENT_MARKER_AHEAD_M * math.cos(bearing)
-            my = drone_pos[1] + EVENT_MARKER_AHEAD_M * math.sin(bearing)
-            for k, body in markers.items():
-                rgb = EVENT_MARKER_SPECS[k][2]
-                if k == kind:
-                    # LANE_BLOCK's long axis (local X) needs to span
-                    # across the drone's path, not sit parallel to it --
-                    # orient perpendicular to the drone's heading (not
-                    # the jittered bearing the marker is placed along) so
-                    # it consistently reads as a barrier crossing dead
-                    # ahead. The sphere/cylinder markers are rotationally
-                    # symmetric about Z, so orientation is a no-op for them.
-                    orn = p.getQuaternionFromEuler([0, 0, drone_yaw + math.pi / 2.0]) \
-                        if k == "LANE_BLOCK" else [0, 0, 0, 1]
-                    p.resetBasePositionAndOrientation(body, [mx, my, drone_pos[2]], orn)
-                    p.changeVisualShape(body, -1, rgbaColor=rgb + [0.85])
-                else:
-                    p.changeVisualShape(body, -1, rgbaColor=rgb + [0.0])
-            hide_at[0] = sim_now + EVENT_MARKER_VISIBLE_S
-
-    if sim_now > hide_at[0]:
-        hide_event_markers(markers)
-        hide_at[0] = float("inf")
-
-    return last_seen_seq
+def update_event_markers(markers: List[int], threat_manager: ThreatManager, flight_z: float) -> None:
+    """Call every loop iteration: repositions the marker pool onto
+    whichever threats are currently active, following their real x/y
+    every tick (not a one-shot placement)."""
+    active = threat_manager.active()
+    for i, body in enumerate(markers):
+        if i < len(active):
+            th = active[i]
+            rgb = THREAT_KIND_RGB.get(th["kind"], [1.0, 1.0, 1.0])
+            p.resetBasePositionAndOrientation(body, [th["x"], th["y"], flight_z], [0, 0, 0, 1])
+            p.changeVisualShape(body, -1, rgbaColor=rgb + [0.85])
+        else:
+            p.changeVisualShape(body, -1, rgbaColor=[1.0, 1.0, 1.0, 0.0])
 
 
 def _format_hud_text(strategy: str, status: str, dist: float, sim_now: float,
-                      nav, violations, energy) -> str:
+                      nav, violations, energy, crash_monitor) -> str:
     """All the metrics of the current run, for the OS-level overlay window
     (hud_overlay.MetricsOverlay) -- not embedded in the 3D world at all
     (an earlier version anchored debug text to a fixed screen position by
@@ -399,6 +368,7 @@ def _format_hud_text(strategy: str, status: str, dist: float, sim_now: float,
     deadline_v = nav._events_violated_deadline
     preempt_v = nav._events_violated_preemptive
     zone_v = violations._total_violations
+    crashes = crash_monitor._total_crashes
     energy_j = energy._energy_j
     total_latency_us, _ = nav._cycle_meter.end()
     compute_energy_j = latency_to_energy_j(total_latency_us, max(1e-6, sim_now - nav._t_start))
@@ -409,7 +379,7 @@ def _format_hud_text(strategy: str, status: str, dist: float, sim_now: float,
         f"elapsed: {sim_now:6.1f} s\n"
         f"events: {handled}  violated: {violated}\n"
         f"  deadline: {deadline_v}  preempt: {preempt_v}\n"
-        f"zone violations: {zone_v}\n"
+        f"zone violations: {zone_v}  crashes: {crashes}\n"
         f"energy: {energy_j:8.0f} J\n"
         f"compute energy: {compute_energy_j:6.2f} J"
     )
@@ -424,7 +394,7 @@ _trail_ids: list = []
 
 def run_strategy(strategy: str, cfg: TeleopConfig, drone_body: int, start_xy, target_xy,
                   lidar: Lidar2D, sim_clock: SimClock, phys_dt: float, gui: bool,
-                  event_markers: Optional[Dict[str, int]] = None,
+                  event_markers: Optional[List[int]] = None,
                   overlay: Optional[MetricsOverlay] = None):
     """Run one strategy from a teleported-to-start drone body through to
     reached/timeout. Returns the nav 8-tuple plus violation/energy summaries."""
@@ -441,34 +411,52 @@ def run_strategy(strategy: str, cfg: TeleopConfig, drone_body: int, start_xy, ta
             hide_event_markers(event_markers)
 
     drone_pose = PoseProvider(drone_body)
-    target_pose = StaticPoseProvider((target_xy[0], target_xy[1], cfg.flight_z))
+    target_pose = TargetSignalProvider((target_xy[0], target_xy[1], cfg.flight_z), drone_pose,
+                                        detect_radius_m=cfg.target_detect_radius_m)
     scan_provider = ScanProvider(lidar, drone_pose, sim_clock)
     cloud_provider = CloudProvider(lidar, drone_pose, sim_clock, n_layers=N_LAYERS,
                                     vertical_angle_min=VERTICAL_ANGLE_MIN,
                                     vertical_angle_increment=VERTICAL_ANGLE_INCREMENT)
     events = EventQueue()
-    emitter = EventEmitter(events, sim_clock, EventCfg(
-        seed=cfg.event_seed, event_deterministic=cfg.event_deterministic,
-        dt_min_s=cfg.event_dt_min_s,
-        dt_max_s=cfg.event_dt_max_s,
-        deadline_alpha=cfg.deadline_alpha,
-        deadline_min_s=cfg.deadline_min_s,
-        deadline_max_s=cfg.deadline_max_s,
-        mix_enemy=cfg.event_mix_enemy,
-        mix_obstacle=cfg.event_mix_obstacle,
-        mix_lane=cfg.event_mix_lane,
+    threat_manager = ThreatManager(events, sim_clock, ThreatCfg(
+        seed=cfg.event_seed,
+        dt_min_s=cfg.event_dt_min_s, dt_max_s=cfg.event_dt_max_s,
+        mix_enemy=cfg.event_mix_enemy, mix_obstacle=cfg.event_mix_obstacle, mix_lane=cfg.event_mix_lane,
+        max_active_threats=cfg.max_active_threats,
+        spawn_range_min_m=cfg.threat_spawn_range_min_m, spawn_range_max_m=cfg.threat_spawn_range_max_m,
+        lead_time_s=cfg.threat_lead_time_s,
+        retire_margin_m=cfg.threat_retire_margin_m, max_lifetime_s=cfg.threat_max_lifetime_s,
+        rearm_cooldown_s=cfg.threat_rearm_cooldown_s,
+        enemy_deadline_min_s=cfg.enemy_deadline_min_s, enemy_deadline_max_s=cfg.enemy_deadline_max_s,
+        obstacle_deadline_min_s=cfg.obstacle_deadline_min_s, obstacle_deadline_max_s=cfg.obstacle_deadline_max_s,
+        lane_deadline_min_s=cfg.lane_deadline_min_s, lane_deadline_max_s=cfg.lane_deadline_max_s,
+        enemy_speed_min_mps=cfg.threat_enemy_speed_min_mps, enemy_speed_max_mps=cfg.threat_enemy_speed_max_mps,
+        enemy_radius_m=cfg.threat_enemy_radius_m, enemy_lead_bias=cfg.threat_enemy_lead_bias,
+        obstacle_speed_min_mps=cfg.threat_obstacle_speed_min_mps,
+        obstacle_speed_max_mps=cfg.threat_obstacle_speed_max_mps,
+        obstacle_radius_min_m=cfg.threat_obstacle_radius_min_m,
+        obstacle_radius_max_m=cfg.threat_obstacle_radius_max_m,
+        obstacle_lead_bias=cfg.threat_obstacle_lead_bias,
+        lane_speed_min_mps=cfg.threat_lane_speed_min_mps, lane_speed_max_mps=cfg.threat_lane_speed_max_mps,
+        lane_radius_min_m=cfg.threat_lane_radius_min_m, lane_radius_max_m=cfg.threat_lane_radius_max_m,
+        lane_lead_bias=cfg.threat_lane_lead_bias,
         log_csv_path=cfg.event_log_csv_path,
     ))
+    threat_sensor = ThreatSensorProvider(drone_pose, detect_range_m=cfg.threat_sensor_range_m,
+                                          fov_deg=cfg.threat_sensor_fov_deg)
     violations = ViolationMonitor(sim_clock, meta_path=cfg.nofly_meta_path)
     energy = EnergyMonitor(sim_clock)
+    crash_monitor = CrashMonitor(sim_clock, drone_radius_m=cfg.drone_radius_m, crash_margin_m=cfg.crash_margin_m)
 
     teleop = PyTeleop(drone_body, cfg)
     nav = LidarTargetNavigatorCA(teleop, cfg, strategy, drone_pose, target_pose,
-                                  scan_provider, cloud_provider, events, sim_clock)
+                                  scan_provider, cloud_provider, events, sim_clock,
+                                  threat_sensor=threat_sensor)
 
     nav.begin_mission()
     violations.mark_run_start(strategy)
     energy.mark_run_start(strategy)
+    crash_monitor.mark_run_start(strategy)
 
     nav_period = 1.0 / nav._gc.rate_hz
     t_start = sim_clock.now()
@@ -486,36 +474,35 @@ def run_strategy(strategy: str, cfg: TeleopConfig, drone_body: int, start_xy, ta
         overlay.update(f"{strategy}\nstatus: running")
     trail_last_pos = (start_xy[0], start_xy[1], cfg.flight_z)
     cam_yaw_deg = 90.0  # faces +Y at drone yaw=0; smoothed below so wind/control wobble doesn't shake the view
-    last_evt_seq = 0
-    evt_hide_at = [float("inf")]
 
     step = 0
     while True:
         scan_provider.update()
         cloud_provider.update()
-        emitter.step()
+        target_pose.update()
 
         pos, orn = p.getBasePositionAndOrientation(drone_body)
+        drone_yaw = p.getEulerFromQuaternion(orn)[2]
+        threat_manager.step(pos[0], pos[1], drone_yaw)
+        threat_sensor.update(threat_manager.active())
+        threat_manager.on_sensed(threat_sensor.latest())
+
         violations.push_pose(pos[0], pos[1], pos[2], sim_clock.now())
         energy.push_pose(pos[0], pos[1], pos[2], sim_clock.now())
+        crash_monitor.push_pose(pos[0], pos[1], pos[2], sim_clock.now())
+        crash_monitor.push_threats(threat_manager.active())
 
         if gui and event_markers is not None:
-            # Every iteration, not throttled: must run at least as often
-            # as events can arrive (period ~phys_dt=0.0167s <= cfg's
-            # event_dt_min_s=0.02s default) so a fast burst of events
-            # never silently skips a visible marker.
-            drone_yaw = p.getEulerFromQuaternion(orn)[2]
-            last_evt_seq = update_event_marker(event_markers, emitter, last_evt_seq,
-                                                pos, drone_yaw, sim_clock.now(), evt_hide_at)
+            update_event_markers(event_markers, threat_manager, cfg.flight_z)
 
         if sim_clock.now() >= next_nav_t:
-            status = nav.tick((target_xy[0], target_xy[1], cfg.flight_z))
+            status = nav.tick()
             next_nav_t += nav_period
             if status == "reached":
                 if overlay is not None:
                     dist = math.hypot(pos[0] - target_xy[0], pos[1] - target_xy[1])
                     overlay.update(_format_hud_text(strategy, "reached", dist, sim_clock.now(),
-                                                     nav, violations, energy))
+                                                     nav, violations, energy, crash_monitor))
                 break
 
         teleop.physics_step(phys_dt)
@@ -551,7 +538,7 @@ def run_strategy(strategy: str, cfg: TeleopConfig, drone_body: int, start_xy, ta
                   f"dist_to_target={dist:6.2f} status={status}")
             if overlay is not None:
                 overlay.update(_format_hud_text(strategy, status, dist, sim_clock.now(),
-                                                 nav, violations, energy))
+                                                 nav, violations, energy, crash_monitor))
 
         if (sim_clock.now() - t_start) > cfg.simulation_timeout:
             break
@@ -560,8 +547,9 @@ def run_strategy(strategy: str, cfg: TeleopConfig, drone_body: int, start_xy, ta
     nav_result = nav.end_mission(status == "reached")
     violation_summary = violations.log_and_reset(strategy, include_boxes=True)
     energy_summary = energy.log_and_reset(strategy)
-    emitter.close()
-    return nav_result, violation_summary, energy_summary
+    crash_summary = crash_monitor.log_and_reset(strategy)
+    threat_manager.close()
+    return nav_result, violation_summary, energy_summary, crash_summary
 
 
 def run_attempt(cfg: TeleopConfig, attempt_idx: int, gui: bool, strategies,
@@ -618,18 +606,21 @@ def run_attempt(cfg: TeleopConfig, attempt_idx: int, gui: bool, strategies,
     event_markers = None
     if gui:
         make_start_marker(start_xy, cfg.flight_z)
-        event_markers = make_event_markers()
+        event_markers = make_event_markers(cfg.max_active_threats)
     lidar = Lidar2D(num_rays=48, max_range=15.0, fov_deg=300.0, draw_debug=gui)
 
     all_reached = True
     buffered = []
     for strategy in strategies:
-        (reached, elapsed, latency_us, compute_energy_j, events_handled,
-         events_violated, events_violated_deadline, events_violated_preemptive), \
-            violation_summary, energy_summary = run_strategy(
-                strategy, cfg, drone_body, start_xy, target_xy, lidar, sim_clock, phys_dt, gui,
-                event_markers=event_markers, overlay=overlay,
-            )
+        nav_result, violation_summary, energy_summary, crash_summary = run_strategy(
+            strategy, cfg, drone_body, start_xy, target_xy, lidar, sim_clock, phys_dt, gui,
+            event_markers=event_markers, overlay=overlay,
+        )
+        reached, elapsed = nav_result.reached, nav_result.elapsed_s
+        latency_us, compute_energy_j = nav_result.total_latency_us, nav_result.compute_energy_j
+        events_handled, events_violated = nav_result.events_handled, nav_result.events_violated
+        events_violated_deadline = nav_result.events_violated_deadline
+        events_violated_preemptive = nav_result.events_violated_preemptive
 
         buffered.append({
             "strategy": strategy, "elapsed": elapsed,
@@ -640,6 +631,11 @@ def run_attempt(cfg: TeleopConfig, attempt_idx: int, gui: bool, strategies,
             "events_handled": events_handled, "events_violated": events_violated,
             "events_violated_deadline": events_violated_deadline,
             "events_violated_preemptive": events_violated_preemptive,
+            "time_to_detect_s": nav_result.time_to_detect_s,
+            "search_ticks_total": nav_result.search_ticks_total,
+            "crash_count": crash_summary.get("total_crashes"),
+            "path_length_m": nav_result.path_length_m,
+            "path_efficiency": nav_result.path_efficiency,
         })
 
         # Terminator record for analysis/log_transformer.py's offline
@@ -654,13 +650,16 @@ def run_attempt(cfg: TeleopConfig, attempt_idx: int, gui: bool, strategies,
             "energy_j": energy_summary.get("energy_j"),
             "mean_power_w": energy_summary.get("mean_power_w"),
             "compute_latency_us": latency_us,
+            "time_to_detect_s": nav_result.time_to_detect_s,
         }, extra={"strategy": strategy})
 
         status_icon = "OK" if reached else "FAIL"
         print(f"  [{status_icon}] {strategy}: elapsed={elapsed:.1f}s "
               f"violations={violation_summary.get('total_violations')} "
+              f"crashes={crash_summary.get('total_crashes')} "
               f"energy_j={energy_summary.get('energy_j'):.0f} "
-              f"events={events_handled}/{events_violated} violated")
+              f"events={events_handled}/{events_violated} violated "
+              f"path_efficiency={nav_result.path_efficiency:.2f}")
 
         if not reached:
             all_reached = False
@@ -695,6 +694,12 @@ def _flush_csv(path: str, run_idx: int, buffered) -> None:
                 "event_violated_preemptive": rec["events_violated_preemptive"],
                 "event_violation_rate": round(
                     rec["events_violated"] / rec["events_handled"] if rec["events_handled"] else 0.0, 2),
+                "time_to_detect_s": (
+                    round(rec["time_to_detect_s"], 2) if rec["time_to_detect_s"] is not None else ""),
+                "search_ticks_total": rec["search_ticks_total"],
+                "crash_count": rec["crash_count"],
+                "path_length_m": round(rec["path_length_m"], 2),
+                "path_efficiency": round(rec["path_efficiency"], 3),
             })
 
 

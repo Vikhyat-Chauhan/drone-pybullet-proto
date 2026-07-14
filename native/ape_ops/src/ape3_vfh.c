@@ -20,6 +20,8 @@
 #endif
 
 #define MAX_SECTORS 128
+#define VISIT_SATURATE 20   /* visited-count cap for the "least-visited" bonus */
+#define LOOKAHEAD_CELLS 1.5f /* project a valley's bearing this many cells ahead to score it */
 
 /* Borenstein & Koren certainty weighting: c = a - b*d, clamped to
  * [0, a]. a/b chosen so certainty reaches 0 at CERTAINTY_ZERO_RANGE_M —
@@ -28,8 +30,17 @@
 #define CERTAINTY_ZERO_RANGE_M 8.0f
 #define CERTAINTY_B            (CERTAINTY_A / CERTAINTY_ZERO_RANGE_M)
 
-ape_result_t ape3_vfh_plan(const ape_params_t *p) {
+ape_result_t ape3_vfh_plan(const ape_params_t *p, ape_search_state_t *state) {
     ape_result_t r = {0};
+
+    /* Partial search memory: mark the drone's current cell visited (one
+     * O(1) lookup+increment) so the least-visited bonus below can steer
+     * away from already-covered ground. No-op once detected or without
+     * search state attached (e.g. avoidance-path calls). */
+    if (state != NULL && !p->target_detected) {
+        int32_t here = ape_grid_index(state, p->drone_x, p->drone_y);
+        if (here >= 0 && state->cells[here] < VISIT_SATURATE) state->cells[here]++;
+    }
 
     int32_t n_sectors = p->vfh_n_sectors;
     if (n_sectors < 2) n_sectors = 2;
@@ -67,8 +78,14 @@ ape_result_t ape3_vfh_plan(const ape_params_t *p) {
     }
 
     /* Goal sector: where yaw_err (already the bearing-to-target error,
-     * body frame) falls in the histogram. */
-    float goal_angle = ape_wrap_pi(p->yaw_err);
+     * body frame) falls in the histogram. Search mode (target
+     * undetected): no known goal bearing -- yaw_err is a harmless
+     * placeholder, so bias toward continuing straight ahead (angle 0)
+     * instead, and let the valley-width/clearance terms below (not
+     * alignment) carry more weight, since "explore the widest opening"
+     * is a more meaningful search heuristic than "align with a
+     * fictitious goal." */
+    float goal_angle = p->target_detected ? ape_wrap_pi(p->yaw_err) : 0.0f;
     int32_t goal_sector = (int32_t)((goal_angle - p->angle_min) / sector_span);
     if (goal_sector < 0) goal_sector = 0;
     if (goal_sector >= n_sectors) goal_sector = n_sectors - 1;
@@ -101,7 +118,60 @@ ape_result_t ape3_vfh_plan(const ape_params_t *p) {
             float clr = min_range[target_sector];
             float clearance_score = ape_clampf(clr / p->range_max, 0.0f, 1.0f);
 
-            float score = 0.4f * align_score + 0.3f * width_score + 0.3f * clearance_score;
+            /* Least-visited bonus (search mode, memory attached only):
+             * project this valley's candidate bearing a short distance
+             * ahead in world frame and prefer sectors pointing at the
+             * least-visited ground -- the "partial memory" tier's search
+             * bias, coarser than APE3's full occupancy/frontier scoring. */
+            float unvisited_score = 0.5f;
+            if (state != NULL && !p->target_detected) {
+                float sector_angle = p->angle_min + ((float)target_sector + 0.5f) * sector_span;
+                float world_angle = p->drone_yaw + sector_angle;
+                float lookahead_m = state->cell_size_m * LOOKAHEAD_CELLS;
+                float px = p->drone_x + lookahead_m * cosf(world_angle);
+                float py = p->drone_y + lookahead_m * sinf(world_angle);
+                int32_t cell = ape_grid_index(state, px, py);
+                float visits = (cell >= 0) ? (float)state->cells[cell] : 0.0f;
+                unvisited_score = 1.0f - ape_clampf(visits / (float)VISIT_SATURATE, 0.0f, 1.0f);
+            }
+
+            float w_align, w_width, w_clear, w_unvisited;
+            if (p->target_detected) {
+                w_align = 0.4f; w_width = 0.3f; w_clear = 0.3f; w_unvisited = 0.0f;
+            } else {
+                w_align = 0.15f; w_width = 0.3f; w_clear = 0.3f; w_unvisited = 0.25f;
+            }
+            float score = w_align * align_score + w_width * width_score
+                        + w_clear * clearance_score + w_unvisited * unvisited_score;
+
+            /* VFH+-style predictive threat penalty: smear each active
+             * moving threat's danger across nearby sectors, decaying
+             * with time-to-collision (ape_threat_time_to_collision) and
+             * angular distance from the threat's currently-sensed
+             * bearing (ape_threat_angular_half_width) -- the CPA-style
+             * cost this tier affords, on top of the ordinary static
+             * histogram. Extra cost: n_sectors * APE_MAX_THREATS, a
+             * fixed trip count -- proportionally the largest of the
+             * three planners' threat-handling additions, consistent
+             * with VFH already being the priciest tier and therefore
+             * the one most likely to blow a tight deadline against a
+             * fast/sudden threat. */
+            float cand_target_angle = p->angle_min + ((float)target_sector + 0.5f) * sector_span;
+            float threat_penalty = 0.0f;
+            for (int32_t ti = 0; ti < APE_MAX_THREATS; ti++) {
+                const ape_threat_t *th = &p->threats[ti];
+                if (!th->active) continue;
+                float ttc = ape_threat_time_to_collision(th->range_m, th->closing_speed_mps);
+                if (ttc >= p->vfh_threat_horizon_s) continue;
+                float half_w = ape_threat_angular_half_width(th->range_m, th->radius_m, p->vehicle_radius_m);
+                float ang_dist = fabsf(ape_wrap_pi(cand_target_angle - th->bearing_rad));
+                if (ang_dist > half_w) continue;
+                float urgency = 1.0f - ape_clampf(ttc / p->vfh_threat_horizon_s, 0.0f, 1.0f);
+                float alignment = 1.0f - ape_clampf(ang_dist / half_w, 0.0f, 1.0f);
+                threat_penalty += urgency * alignment;
+            }
+            score -= p->vfh_w_threat * threat_penalty;
+
             if (score > best_score) {
                 best_score = score;
                 best_target_sector = target_sector;
@@ -144,7 +214,17 @@ ape_result_t ape3_vfh_plan(const ape_params_t *p) {
     }
     v = ape_stopping_limited_speed(v, d_front, p->max_decel_mps2, p->stop_margin_m);
 
-    float ds = p->sudden_obj_radius_m + p->vehicle_radius_m + p->sudden_obj_clearance_m;
+    float nearest_threat_radius = p->sudden_obj_radius_m;
+    float nearest_threat_range = 1.0e9f;
+    for (int32_t ti = 0; ti < APE_MAX_THREATS; ti++) {
+        const ape_threat_t *th = &p->threats[ti];
+        if (!th->active) continue;
+        if (th->range_m < nearest_threat_range) {
+            nearest_threat_range = th->range_m;
+            nearest_threat_radius = th->radius_m;
+        }
+    }
+    float ds = nearest_threat_radius + p->vehicle_radius_m + p->sudden_obj_clearance_m;
     float score = 0.12f * ds - 0.04f * fabsf(wz) + 0.02f * v;
 
     r.v = v;

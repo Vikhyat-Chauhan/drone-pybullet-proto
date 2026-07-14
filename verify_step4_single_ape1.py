@@ -14,7 +14,7 @@ from arena import ArenaCfg, generate_buildings, pick_start_target
 from lidar import Lidar2D
 from config import TeleopConfig
 from teleop import PyTeleop
-from sim_adapters import SimClock, PoseProvider, StaticPoseProvider, ScanProvider, CloudProvider, EventQueue
+from sim_adapters import SimClock, PoseProvider, TargetSignalProvider, ScanProvider, CloudProvider, EventQueue
 from nav_algorithm import LidarTargetNavigatorCA
 
 cfg = TeleopConfig()
@@ -47,7 +47,8 @@ p.changeDynamics(drone_body, -1, linearDamping=0.0, angularDamping=0.0)
 lidar = Lidar2D(num_rays=48, max_range=15.0, fov_deg=300.0, draw_debug=False)
 
 drone_pose = PoseProvider(drone_body)
-target_pose = StaticPoseProvider((target_xy[0], target_xy[1], cfg.flight_z))
+target_pose = TargetSignalProvider((target_xy[0], target_xy[1], cfg.flight_z), drone_pose,
+                                    detect_radius_m=math.inf)
 scan_provider = ScanProvider(lidar, drone_pose, sim_clock)
 cloud_provider = CloudProvider(lidar, drone_pose, sim_clock, n_layers=5,
                                 vertical_angle_min=-0.0872665, vertical_angle_increment=0.0436332)
@@ -68,6 +69,7 @@ t0_wall = time.time()
 while sim_clock.now() < timeout_s:
     scan_provider.update()
     cloud_provider.update()
+    target_pose.update()
 
     if sim_clock.now() >= next_nav_t:
         status = nav.tick((target_xy[0], target_xy[1], cfg.flight_z))
@@ -85,7 +87,9 @@ while sim_clock.now() < timeout_s:
         dist = math.hypot(pos[0] - target_xy[0], pos[1] - target_xy[1])
         print(f"sim_t={sim_clock.now():6.1f}s pos=({pos[0]:7.2f},{pos[1]:7.2f}) dist={dist:6.2f} status={status}")
 
-reached, elapsed, latency_us, energy_j, handled, violated, viol_deadline, viol_preempt = nav.end_mission(status == "reached")
+nav_result = nav.end_mission(status == "reached")
+reached, elapsed = nav_result.reached, nav_result.elapsed_s
+handled, violated = nav_result.events_handled, nav_result.events_violated
 print(f"\nreached={reached} elapsed={elapsed:.2f}s sim_steps={step} wall_time={time.time()-t0_wall:.2f}s")
 print(f"events_handled={handled} events_violated={violated}")
 assert reached, "drone failed to reach target within timeout"

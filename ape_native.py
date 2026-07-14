@@ -1,10 +1,10 @@
 """
 ape_native.py — ctypes bridge to the native APE planners
-(native/ape_ops/): APE1 = reactive potential-field/Bug-style
-nudge, APE2 = Vector Field Histogram, APE3 = Dynamic Window Approach
-(identities deliberately swapped at the native_api.c dispatch layer from
-the ape2_dwa.c/ape3_vfh.c source filenames, so the heavier/slower
-planner -- DWA -- sits under the APE3 label).
+(native/ape_ops/): APE1 = reactive potential-field/Bug-style nudge,
+APE2 = Dynamic Window Approach (medium compute), APE3 = Vector Field
+Histogram (most compute, most sophisticated) -- dispatch matches the
+ape2_dwa.c/ape3_vfh.c source filenames, and the gem5 cycle table
+(gem5_measured_latencies.py) is keyed the same way.
 These are the REAL decision-making algorithms, not a synthetic cost
 proxy — nav_algorithm.py's role in the APE path is to marshal sensor
 data + config into a call here and unpack the result; no algorithm logic
@@ -37,6 +37,19 @@ _LIB_PATH = (
 )
 
 
+APE_MAX_THREATS = 3
+
+
+class ApeThreat(ctypes.Structure):
+    _fields_ = [
+        ("active", ctypes.c_int32),
+        ("range_m", ctypes.c_float),
+        ("bearing_rad", ctypes.c_float),
+        ("closing_speed_mps", ctypes.c_float),
+        ("radius_m", ctypes.c_float),
+    ]
+
+
 class ApeParams(ctypes.Structure):
     _fields_ = [
         ("ranges", ctypes.POINTER(ctypes.c_float)),
@@ -51,6 +64,11 @@ class ApeParams(ctypes.Structure):
 
         ("v_cmd", ctypes.c_float),
         ("yaw_err", ctypes.c_float),
+        ("target_detected", ctypes.c_int32),
+
+        ("drone_x", ctypes.c_float),
+        ("drone_y", ctypes.c_float),
+        ("drone_yaw", ctypes.c_float),
 
         ("max_v", ctypes.c_float),
         ("max_wz", ctypes.c_float),
@@ -80,6 +98,12 @@ class ApeParams(ctypes.Structure):
         ("vfh_n_sectors", ctypes.c_int32),
         ("vfh_threshold", ctypes.c_float),
         ("vfh_smax_sectors", ctypes.c_float),
+
+        ("threats", ApeThreat * APE_MAX_THREATS),
+        ("n_threats", ctypes.c_int32),
+        ("dwa_w_threat", ctypes.c_float),
+        ("vfh_w_threat", ctypes.c_float),
+        ("vfh_threat_horizon_s", ctypes.c_float),
     ]
 
 
@@ -90,6 +114,26 @@ class ApeResult(ctypes.Structure):
         ("vz", ctypes.c_float),
         ("score", ctypes.c_float),
         ("ok", ctypes.c_int32),
+    ]
+
+
+APE_GRID_MAX_CELLS = 4096
+
+
+class ApeSearchState(ctypes.Structure):
+    """Mirrors ape_types.h's ape_search_state_t. One instance per APE2/
+    APE3 per mission, owned by nav_algorithm.py (allocated/reset in
+    begin_mission()), passed by pointer into every plan_ape2/plan_ape3
+    call for that mission's lifetime. APE1 never gets one -- no memory,
+    by design."""
+    _fields_ = [
+        ("initialized", ctypes.c_int32),
+        ("grid_w", ctypes.c_int32),
+        ("grid_h", ctypes.c_int32),
+        ("cell_size_m", ctypes.c_float),
+        ("origin_x", ctypes.c_float),
+        ("origin_y", ctypes.c_float),
+        ("cells", ctypes.c_uint8 * APE_GRID_MAX_CELLS),
     ]
 
 
@@ -108,26 +152,40 @@ def _load() -> ctypes.CDLL:
         )
     lib = ctypes.CDLL(str(_LIB_PATH))
 
-    for name in ("ape_native_plan_ape1", "ape_native_plan_ape2", "ape_native_plan_ape3"):
+    lib.ape_native_plan_ape1.argtypes = [ctypes.POINTER(ApeParams), ctypes.POINTER(ApeResult)]
+    lib.ape_native_plan_ape1.restype = None
+    for name in ("ape_native_plan_ape2", "ape_native_plan_ape3"):
         fn = getattr(lib, name)
-        fn.argtypes = [ctypes.POINTER(ApeParams), ctypes.POINTER(ApeResult)]
+        fn.argtypes = [ctypes.POINTER(ApeParams), ctypes.POINTER(ApeSearchState), ctypes.POINTER(ApeResult)]
         fn.restype = None
+
+    lib.ape_native_search_state_reset.argtypes = [
+        ctypes.POINTER(ApeSearchState), ctypes.c_int32, ctypes.c_int32,
+        ctypes.c_float, ctypes.c_float, ctypes.c_float,
+    ]
+    lib.ape_native_search_state_reset.restype = None
 
     lib.ape_native_sizeof_params.argtypes = []
     lib.ape_native_sizeof_params.restype = ctypes.c_int32
     lib.ape_native_sizeof_result.argtypes = []
     lib.ape_native_sizeof_result.restype = ctypes.c_int32
+    lib.ape_native_sizeof_search_state.argtypes = []
+    lib.ape_native_sizeof_search_state.restype = ctypes.c_int32
 
     c_params_size = lib.ape_native_sizeof_params()
     c_result_size = lib.ape_native_sizeof_result()
+    c_search_state_size = lib.ape_native_sizeof_search_state()
     py_params_size = ctypes.sizeof(ApeParams)
     py_result_size = ctypes.sizeof(ApeResult)
-    if c_params_size != py_params_size or c_result_size != py_result_size:
+    py_search_state_size = ctypes.sizeof(ApeSearchState)
+    if (c_params_size != py_params_size or c_result_size != py_result_size
+            or c_search_state_size != py_search_state_size):
         raise RuntimeError(
-            "ape_native: ABI mismatch between ape_types.h and ApeParams/ApeResult.\n"
+            "ape_native: ABI mismatch between ape_types.h and ApeParams/ApeResult/ApeSearchState.\n"
             f"  ape_params_t: C sizeof={c_params_size}, Python ctypes sizeof={py_params_size}\n"
             f"  ape_result_t: C sizeof={c_result_size}, Python ctypes sizeof={py_result_size}\n"
-            "Field order/types have drifted out of sync — fix ApeParams/ApeResult in "
+            f"  ape_search_state_t: C sizeof={c_search_state_size}, Python ctypes sizeof={py_search_state_size}\n"
+            "Field order/types have drifted out of sync — fix ApeParams/ApeResult/ApeSearchState in "
             "ape_native.py to match ape_types.h exactly before trusting this binding."
         )
 
@@ -135,20 +193,31 @@ def _load() -> ctypes.CDLL:
     return lib
 
 
-def _plan(fn_name: str, params: ApeParams) -> ApeResult:
+def plan_ape1(params: ApeParams) -> ApeResult:
     lib = _load()
     result = ApeResult()
-    getattr(lib, fn_name)(ctypes.byref(params), ctypes.byref(result))
+    lib.ape_native_plan_ape1(ctypes.byref(params), ctypes.byref(result))
     return result
 
 
-def plan_ape1(params: ApeParams) -> ApeResult:
-    return _plan("ape_native_plan_ape1", params)
+def _plan_with_state(fn_name: str, params: ApeParams, state: "ApeSearchState | None") -> ApeResult:
+    lib = _load()
+    result = ApeResult()
+    state_ptr = ctypes.byref(state) if state is not None else None
+    getattr(lib, fn_name)(ctypes.byref(params), state_ptr, ctypes.byref(result))
+    return result
 
 
-def plan_ape2(params: ApeParams) -> ApeResult:
-    return _plan("ape_native_plan_ape2", params)
+def plan_ape2(params: ApeParams, state: "ApeSearchState | None" = None) -> ApeResult:
+    return _plan_with_state("ape_native_plan_ape2", params, state)
 
 
-def plan_ape3(params: ApeParams) -> ApeResult:
-    return _plan("ape_native_plan_ape3", params)
+def plan_ape3(params: ApeParams, state: "ApeSearchState | None" = None) -> ApeResult:
+    return _plan_with_state("ape_native_plan_ape3", params, state)
+
+
+def reset_search_state(state: ApeSearchState, grid_w: int, grid_h: int,
+                        cell_size_m: float, origin_x: float, origin_y: float) -> None:
+    lib = _load()
+    lib.ape_native_search_state_reset(ctypes.byref(state), int(grid_w), int(grid_h),
+                                       float(cell_size_m), float(origin_x), float(origin_y))

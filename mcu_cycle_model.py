@@ -42,6 +42,18 @@ from gem5_measured_latencies import (
     SLEEP_MA as _SLEEP_MA,
 )
 
+# TOTAL_CYCLES_SEARCH (search-and-rescue exploration workload) is only
+# present once gem5_measured_latencies.py has been regenerated against
+# the search_apeN fixtures (native/ape_ops/gem5_bench/bench/src/main.c's
+# APE_BENCH_MODE=1, native/ape_ops/gem5_bench/scripts/
+# freeze_measured_latencies.py) -- the checked-in frozen file predates
+# that fixture, so this stays optional rather than crashing every import
+# in the meantime.
+try:
+    from gem5_measured_latencies import TOTAL_CYCLES_SEARCH as _GEM5_TOTAL_CYCLES_SEARCH
+except ImportError:
+    _GEM5_TOTAL_CYCLES_SEARCH = None
+
 # Cycle-time constant for the gem5 study's clock — converts the study's
 # raw TOTAL_CYCLES into microseconds below.
 _CYCLE_TIME_US = 1.0e6 / _CPU_CLOCK_HZ
@@ -57,18 +69,42 @@ APE_LATENCY_US: dict[str, float] = {
     "APE3": _GEM5_TOTAL_CYCLES["ape3"] / _GEM5_ITERATIONS * _CYCLE_TIME_US,
 }
 
+# Same measurement for each planner's search-and-rescue exploration code
+# path (target undetected) -- a genuinely different workload per planner
+# from APE_LATENCY_US above, not a different input to the same code (see
+# native/ape_ops/src/ape{1_bug,2_dwa,3_vfh}.c's target_detected branches).
+# None until gem5_measured_latencies.py has been regenerated against the
+# search_apeN fixtures -- McuCycleMeter.record_tick() no-ops (contributes
+# zero latency/energy) rather than guessing in the meantime.
+APE_SEARCH_LATENCY_US: dict[str, float] | None = (
+    {
+        "APE1": _GEM5_TOTAL_CYCLES_SEARCH["ape1"] / _GEM5_ITERATIONS * _CYCLE_TIME_US,
+        "APE2": _GEM5_TOTAL_CYCLES_SEARCH["ape2"] / _GEM5_ITERATIONS * _CYCLE_TIME_US,
+        "APE3": _GEM5_TOTAL_CYCLES_SEARCH["ape3"] / _GEM5_ITERATIONS * _CYCLE_TIME_US,
+    }
+    if _GEM5_TOTAL_CYCLES_SEARCH is not None else None
+)
+
 # Which chip the active gem5 profile (gem5_measured_latencies.py) targets.
 CHIP: str = _CHIP
 
-# DEADLINE_SCALE: the ONLY software/scheduling-overhead multiplier applied
-# in this pipeline (Python interpreter + OS thread-scheduling contention on
-# the flight controller). budget_ms = APE_LATENCY_US[name] * DEADLINE_SCALE
-# / 1000 (µs -> ms unit conversion is the trailing /1000; DEADLINE_SCALE is
-# the overhead factor). APE_LATENCY_US is real gem5-measured compute cost
-# of the real Bug/DWA/VFH planners — whether DEADLINE_SCALE=1000 is still
-# the right overhead multiplier on top of these numbers is unverified — a
-# modeling decision, not implied by this file — flagged, not resolved,
-# here. See docs/POWER_MODEL.md.
+# DEADLINE_SCALE: NOT a bare-metal hardware-overhead estimate. A genuinely
+# idle Cortex-M4 running only the APE planner would clear even APE3's
+# raw gem5 budget (~152µs) with room to spare against this sim's
+# 147-650ms threat deadlines -- ISR entry (~tens of ns) and even a full
+# FreeRTOS scheduling tick (~1ms) are both negligible against that
+# window, so a physically-literal overhead multiplier would make the
+# APE1/2/3 deadline race moot (APE3 wins essentially every time).
+# DEADLINE_SCALE=1000 is instead a deliberate CONTENTION multiplier: it
+# models the APE call competing for the same core with everything else a
+# real flight-controller-class MCU is also running without a separate
+# companion computer -- sensor fusion/filtering, telemetry, motor-mixer
+# control loop, other RTOS tasks -- rather than running alone. That
+# contention is what's unverified/unmeasured here (this sim doesn't
+# simulate those other tasks), not the underlying gem5 compute numbers
+# themselves. budget_ms = APE_LATENCY_US[name] * DEADLINE_SCALE / 1000
+# (µs -> ms unit conversion is the trailing /1000; DEADLINE_SCALE is the
+# contention factor). See docs/POWER_MODEL.md.
 DEADLINE_SCALE: float = 1000.0
 
 # ---------------------------------------------------------------------------
@@ -173,6 +209,26 @@ class McuCycleMeter:
         """
         t_sel = APE_LATENCY_US.get(selected, 0.0)
         cost  = sum(min(APE_LATENCY_US.get(n, 0.0), t_sel) for n in running)
+        self._total_us += cost
+        if selected in self._per_selected:
+            self._per_selected[selected] += cost
+
+    def record_tick(self, selected: str) -> None:
+        """
+        Record one search-mode tick's compute cost (nav_algorithm.py's
+        _search_native_plan, called every tick while the target is
+        undetected). Nominal, gem5-measured APE_SEARCH_LATENCY_US --
+        same nominal-table-driven model as record_event, not a per-call
+        wall-clock measurement, for consistency with the rest of this
+        pipeline's energy accounting. No-op if APE_SEARCH_LATENCY_US
+        hasn't been populated yet (see its definition above).
+
+        selected : APE whose search logic ran this tick ("APE1", "APE2",
+                   or "APE3")
+        """
+        if APE_SEARCH_LATENCY_US is None:
+            return
+        cost = APE_SEARCH_LATENCY_US.get(selected, 0.0)
         self._total_us += cost
         if selected in self._per_selected:
             self._per_selected[selected] += cost

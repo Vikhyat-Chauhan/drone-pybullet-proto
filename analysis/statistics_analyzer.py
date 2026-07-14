@@ -99,6 +99,8 @@ def run_analysis(zone_metric: str = "mean") -> Dict[str, Any]:
     col_event_violation_rate = resolve_opt("event_violation_rate")
     col_event_violated_deadline   = resolve_opt("event_violated_deadline")
     col_event_violated_preemptive = resolve_opt("event_violated_preemptive")
+    col_crash_count = resolve_opt("crash_count")
+    col_path_efficiency = resolve_opt("path_efficiency")
 
     # ---------- Coercions ----------
     def to_num(s: pd.Series) -> pd.Series:
@@ -149,6 +151,16 @@ def run_analysis(zone_metric: str = "mean") -> Dict[str, Any]:
         data["_evt_viol_preemptive"] = to_num(df_raw[col_event_violated_preemptive])
     else:
         data["_evt_viol_preemptive"] = pd.Series(np.nan, index=df_raw.index, dtype=float)
+
+    if col_crash_count is not None:
+        data["_crash_count"] = to_num(df_raw[col_crash_count])
+    else:
+        data["_crash_count"] = pd.Series(np.nan, index=df_raw.index, dtype=float)
+
+    if col_path_efficiency is not None:
+        data["_path_efficiency"] = to_num(df_raw[col_path_efficiency])
+    else:
+        data["_path_efficiency"] = pd.Series(np.nan, index=df_raw.index, dtype=float)
 
     if df_phys is not None:
         data["_compute_power_w"] = df_phys["compute_power_w"].reindex(df_raw.index)
@@ -215,6 +227,23 @@ def run_analysis(zone_metric: str = "mean") -> Dict[str, Any]:
         summary["event_viol_deadline_mean"]   = g["_evt_viol_deadline"].mean()
     if not df_f["_evt_viol_preemptive"].isna().all():
         summary["event_viol_preemptive_mean"] = g["_evt_viol_preemptive"].mean()
+
+    # Crash / path-efficiency summary (if present) -- this is the pair
+    # of columns that shows the fast-vs-sophisticated APE tradeoff: a
+    # cheap/fast planner should show a low crash rate (always reacts in
+    # time) but low path_efficiency (crude, oversized detours), while a
+    # slow/sophisticated planner should show a higher crash rate on
+    # fast/sudden threats (frequently blows its deadline) but higher
+    # path_efficiency when it does succeed.
+    if not df_f["_crash_count"].isna().all():
+        summary["crash_count_mean"] = g["_crash_count"].mean()
+        summary["crash_count_median"] = g["_crash_count"].apply(med)
+        if not df_f["_events_handled"].isna().all():
+            _crash_rate = (df_f["_crash_count"] / df_f["_events_handled"].replace(0, np.nan))
+            summary["crash_rate_mean"] = _crash_rate.groupby(df_f["_strategy"]).mean()
+    if not df_f["_path_efficiency"].isna().all():
+        summary["path_efficiency_mean"] = g["_path_efficiency"].mean()
+        summary["path_efficiency_median"] = g["_path_efficiency"].apply(med)
 
     # Physically-grounded power/energy summary (if source columns were present).
     # See analysis/power_estimate.py for the model (Glauert
