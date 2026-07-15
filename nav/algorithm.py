@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# Port of CANavigator's navigation/nav_algorithm_T.py::LidarTargetNavigatorCA.
-# Decision logic (event racing, APE cascade resolution, NFZ repulsion,
-# TTC/stopping-distance, breadcrumbs, jerk caps) is preserved verbatim; only
-# the I/O boundary changed: ROS subscribers -> sim/sim_adapters.py providers,
-# and go_to()'s blocking while-loop -> tick() (one decision step, driven
-# externally) + begin_mission()/end_mission(), so experiment/orchestrator.py
+# Core navigation algorithm for the Drone simulation
+# includes Decision logic (event racing, APE cascade resolution, NFZ repulsion,
+# TTC/stopping-distance, breadcrumbs, jerk caps); only
+# the I/O boundary -> tick() (one decision step, driven externally) + 
+# begin_mission()/end_mission(), so experiment/orchestrator.py
 # can interleave p.stepSimulation() at the physics rate independent of the
-# nav rate (the original relied on Gazebo's own async clock for this).
+# nav rate.
 #
 # Public API:
 #   LidarTargetNavigatorCA.begin_mission()
@@ -41,7 +40,7 @@ def _wrap_pi(a: float) -> float:
     return (a + math.pi) % (2.0 * math.pi) - math.pi
 
 
-# ===== Navigation configs (defaults preserved verbatim from nav_algorithm_T.py) =====
+# ===== Navigation configs (defaults) =====
 @dataclass
 class GoToConfig:
     goal_radius_m: float = 4.0
@@ -137,7 +136,7 @@ class EventDecisionCfg:
 
 @dataclass
 class ApeAlgoCfg:
-    """Tuning for the native VFH (APE2) and DWA (APE3) planners, plus
+    """Tuning for the native DWA (APE2) and VFH (APE3) planners, plus
     multi-layer LiDAR geometry (mirrors the original model.sdf's <vertical>
     block, as plain numbers since there's no SDF here)."""
     n_layers: int = 5
@@ -402,8 +401,7 @@ class LidarTargetNavigatorCA:
 
     def _build_ape_params(self, snap, multilayer: bool) -> ape_native.ApeParams:
         """Marshals scan + nav state + config into the native planner's
-        param struct (ported verbatim; scan/cloud are plain ScanMsg/tuple
-        now instead of ROS messages)."""
+        param struct."""
         scan = snap["scan"]
         p = ape_native.ApeParams()
 
@@ -480,11 +478,7 @@ class LidarTargetNavigatorCA:
     def _evt_plan_ape1(self, snap, budget_ms, arrival_sim_t):
         """Runs the native planner synchronously (real compute costs
         microseconds), then schedules the proposal ready at
-        arrival_sim_t + budget_ms/1000 in SIM time rather than emulating
-        the gem5-measured latency with a real wall-clock sleep -- a sleep
-        can't represent a few-ms budget once the loop runs unthrottled
-        (headless mode advances SimClock far faster than real time, and
-        GIL/scheduling jitter alone can dwarf it), while sim-time
+        arrival_sim_t + budget_ms/1000 in SIM time use since sim-time
         scheduling is exact regardless of wall-clock speed."""
         params = self._build_ape_params(snap, multilayer=False)
         r = ape_native.plan_ape1(params)
