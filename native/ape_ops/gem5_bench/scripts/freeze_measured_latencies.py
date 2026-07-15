@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-freeze_measured_latencies.py — regenerates gem5_measured_latencies.py
-(repo root) from a fresh gem5 cycle-accurate run of the real native APE
-planners (ape1_bug_plan/ape2_dwa_plan/ape3_vfh_plan — see
-native/ape_ops/src/) against a named CPU profile from ../configs/
-(default: cortex_m4_168mhz.py, an STM32F405/Cortex-M4 @ 168MHz — the
-actual low-compute flight-controller MCU this repo targets; see
-docs/POWER_MODEL.md). This one measurement feeds BOTH live
-deadline-feasibility timing (budget_ms) and compute-energy accounting.
+freeze_measured_latencies.py — regenerates nav/gem5_measured_latencies.py
+from a fresh gem5 cycle-accurate run of the real native APE planners
+(ape1_bug_plan/ape2_dwa_plan/ape3_vfh_plan — native/ape_ops/src/) against
+a named CPU profile from ../configs/ (default: cortex_m4_168mhz.py,
+STM32F405/Cortex-M4 @ 168MHz, this repo's target MCU; see
+docs/POWER_MODEL.md). Feeds both live deadline-feasibility timing
+(budget_ms) and compute-energy accounting.
 
 Usage:
     GEM5_ROOT=/path/to/gem5 python3 freeze_measured_latencies.py [--profile NAME]
@@ -18,12 +17,11 @@ Requires:
     - a gem5 checkout with build/ARM/gem5.opt built
       (cd $GEM5_ROOT && scons build/ARM/gem5.opt)
 
-Switching CPU/algorithm again in the future: add a new profile module to
-../configs/ (CPU_PRESET/CPU_FREQ/MEM_TYPE/CHIP/VDD/ACTIVE_MA/SLEEP_MA),
-then rerun this script with --profile <name>. No other code changes
-needed — run_gem5_study.py discovers profiles dynamically, and
-mcu_cycle_model.py reads CHIP/CPU_CLOCK_HZ/ACTIVE_MA/SLEEP_MA/VDD
-straight out of the regenerated gem5_measured_latencies.py.
+To switch CPU: add a profile module to ../configs/
+(CPU_PRESET/CPU_FREQ/MEM_TYPE/CHIP/VDD/ACTIVE_MA/SLEEP_MA), then rerun
+with --profile <name> -- run_gem5_study.py discovers profiles dynamically
+and nav/mcu_cycle_model.py reads its constants from the regenerated file,
+no other code changes needed.
 
 See docs/POWER_MODEL.md for the full methodology.
 """
@@ -46,12 +44,6 @@ _CONFIGS_DIR = _GEM5_BENCH_DIR / "configs"
 ITERATIONS = 200
 PLANNERS = ("ape1", "ape2", "ape3")
 
-# Search-and-rescue exploration workload (target undetected -- see
-# bench/src/main.c's APE_BENCH_MODE) measured from the search_apeN
-# binaries (bench/Makefile), a genuinely different workload per planner
-# from the avoidance one above, not just a different input.
-SEARCH_PLANNERS = ("ape1", "ape2", "ape3")
-
 
 def _clock_hz_from_freq_str(freq: str) -> float:
     """Parses a gem5 --cpu-freq string like '168MHz' into Hz."""
@@ -63,8 +55,7 @@ def _clock_hz_from_freq_str(freq: str) -> float:
     raise ValueError(f"unrecognized CPU_FREQ format: {freq!r}")
 
 
-def _render(profile_name: str, study, total_cycles: dict[str, int],
-            total_cycles_search: dict[str, int]) -> str:
+def _render(profile_name: str, study, total_cycles: dict[str, int]) -> str:
     cpu_clock_hz = _clock_hz_from_freq_str(study.CPU_FREQ)
     return f'''"""
 gem5_measured_latencies.py — GENERATED FILE, do not edit by hand.
@@ -73,32 +64,20 @@ Regenerate with:
     cd native/ape_ops/gem5_bench
     GEM5_ROOT=/path/to/gem5 python3 scripts/freeze_measured_latencies.py --profile {profile_name}
 
-Raw per-invocation cycle counts from gem5 cycle-accurate simulation
-using an in-order MinorCPU @ {study.CPU_FREQ} (see
-native/ape_ops/gem5_bench/configs/{profile_name}.py — an in-order
-MinorCPU APPROXIMATION of {study.CHIP}, NOT a true M-profile simulation;
-gem5 has no M-profile CPU model) of the REAL native APE planners
-(ape1_bug_plan/ape2_dwa_plan/ape3_vfh_plan — see native/ape_ops/src/),
-not a synthetic op-count proxy. Read directly from each profile's
-stats.txt ROI block (see native/ape_ops/gem5_bench/bench/src/main.c for
-the m5_reset_stats/m5_dump_stats bracketing, against one fixed
-open-corridor scan fixture).
+Raw per-invocation cycle counts from gem5 cycle-accurate simulation using
+an in-order MinorCPU @ {study.CPU_FREQ} (native/ape_ops/gem5_bench/configs/{profile_name}.py
+— an APPROXIMATION of {study.CHIP}; gem5 has no true M-profile CPU model)
+of the REAL native APE planners (ape1_bug_plan/ape2_dwa_plan/ape3_vfh_plan
+— native/ape_ops/src/), not a synthetic op-count proxy. Read from each
+profile's stats.txt ROI block (see main.c's m5_reset_stats/m5_dump_stats
+bracketing around one fixed open-corridor scan fixture).
 
-TOTAL_CYCLES_SEARCH is the same measurement for each planner's
-search-and-rescue exploration code path (target undetected, from the
-search_apeN binaries -- see bench/src/main.c's APE_BENCH_MODE and
-nav_algorithm.py's _search_native_plan) -- a genuinely different
-workload per planner (APE2/APE3 also touch their persistent search-state
-grid), not a different input to the same code.
-
-This is the ACTIVE simulated CPU for this repo's power model: it feeds
-both live deadline-feasibility timing (budget_ms, via
-mcu_cycle_model.APE_LATENCY_US) and compute-energy accounting (via
-mcu_cycle_model.McuCycleMeter, using ACTIVE_MA/SLEEP_MA/VDD below) — one
-processor, one measurement, no separate higher-power companion-computer
-model. Other CPU profiles live in native/ape_ops/gem5_bench/configs/ and
-past frozen results in native/ape_ops/gem5_bench/out/frozen/ — see
-docs/POWER_MODEL.md for the full methodology and multi-profile workflow.
+The ACTIVE simulated CPU for this repo's power model: feeds both live
+deadline-feasibility timing (budget_ms, via mcu_cycle_model.APE_LATENCY_US)
+and compute-energy accounting (via McuCycleMeter, using ACTIVE_MA/SLEEP_MA/VDD
+below) — one processor, one measurement. Other profiles live in
+native/ape_ops/gem5_bench/configs/; see docs/POWER_MODEL.md for the full
+methodology.
 """
 
 PROFILE_NAME = "{profile_name}"
@@ -119,14 +98,6 @@ TOTAL_CYCLES: dict[str, int] = {{
     "ape1": {total_cycles["ape1"]},
     "ape2": {total_cycles["ape2"]},
     "ape3": {total_cycles["ape3"]},
-}}
-
-# Same measurement, search-and-rescue exploration workload (see the
-# module docstring above).
-TOTAL_CYCLES_SEARCH: dict[str, int] = {{
-    "ape1": {total_cycles_search["ape1"]},
-    "ape2": {total_cycles_search["ape2"]},
-    "ape3": {total_cycles_search["ape3"]},
 }}
 '''
 
@@ -152,22 +123,9 @@ def main() -> None:
         total_cycles[planner] = parse_num_cycles(stats_path)
         print(f"{planner}: TOTAL_CYCLES = {total_cycles[planner]}")
 
-    total_cycles_search: dict[str, int] = {}
-    for planner in SEARCH_PLANNERS:
-        binary = _GEM5_BENCH_DIR / "bench" / "build" / "arm" / f"search_{planner}"
-        if not binary.exists():
-            raise FileNotFoundError(
-                f"{binary} not found — build it first with:\n"
-                f"    GEM5_ROOT=... make -C {_GEM5_BENCH_DIR / 'bench'} arm"
-            )
-        outdir = _GEM5_BENCH_DIR / "out" / "mcu" / args.profile / f"search_{planner}"
-        stats_path = run_study(args.profile, binary, outdir)
-        total_cycles_search[planner] = parse_num_cycles(stats_path)
-        print(f"search_{planner}: TOTAL_CYCLES_SEARCH = {total_cycles_search[planner]}")
+    rendered = _render(args.profile, study, total_cycles)
 
-    rendered = _render(args.profile, study, total_cycles, total_cycles_search)
-
-    out_path = _REPO_ROOT / "gem5_measured_latencies.py"
+    out_path = _REPO_ROOT / "nav" / "gem5_measured_latencies.py"
     out_path.write_text(rendered)
     print(f"Wrote {out_path}")
 

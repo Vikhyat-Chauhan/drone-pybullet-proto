@@ -10,7 +10,7 @@ and regenerable from within `drone-pybullet-proto`.
 
 ## 1. Compute power (single MCU model)
 
-`mcu_cycle_model.py` models CPU energy for a low-power flight-controller
+`nav/mcu_cycle_model.py` models CPU energy for a low-power flight-controller
 MCU — the kind of part a genuinely low-compute drone would actually
 carry, running its own navigation stack with no separate companion
 computer. **One gem5 measurement feeds both compute-energy accounting
@@ -61,10 +61,10 @@ compute cost under a "parallel-halt" execution model: when running CA
 `min(its_latency, latency_of_selected)`; solo modes (APE1/APE2/APE3) just
 use that APE's own latency.
 
-Per-planner latency comes from `APE_LATENCY_US` in `mcu_cycle_model.py`,
-derived from `gem5_measured_latencies.py` (§3 below) — real gem5-measured
+Per-planner latency comes from `APE_LATENCY_US` in `nav/mcu_cycle_model.py`,
+derived from `nav/gem5_measured_latencies.py` (§3 below) — real gem5-measured
 cycle counts of the actual native planners, not a synthetic op-count
-proxy. This is the SAME table `nav_algorithm.py`'s `budget_ms` (live
+proxy. This is the SAME table `nav/algorithm.py`'s `budget_ms` (live
 deadline feasibility) is derived from — one processor, one measurement,
 used for both purposes. `ACTIVE_MA`/`SLEEP_MA`/`VDD`/`CHIP` are frozen
 into the same generated file, so the power constants above always match
@@ -79,7 +79,7 @@ neither ISR entry (tens of ns) nor a full FreeRTOS scheduling tick
 (~1 ms) comes close to mattering at that timescale. Taken bare-metal, the
 deadline race would be moot: APE3 would win essentially every time.
 
-`DEADLINE_SCALE=1000` (`mcu_cycle_model.py`) is therefore not a
+`DEADLINE_SCALE=1000` (`nav/mcu_cycle_model.py`) is therefore not a
 bare-metal hardware-overhead figure — it's a deliberate **CPU-contention
 stress multiplier**, modeling the APE call sharing the one flight-
 controller core with everything else this class of MCU runs without a
@@ -107,13 +107,25 @@ rather than always waiting for the highest-quality one) — under a
 plausible contended-CPU scenario, the slow planner alone can burn through
 a meaningful share of the literature-cited reaction-time budget. Under a
 bare-metal (uncontended) assumption instead, this justification
-evaporates — see `mcu_cycle_model.py`'s `DEADLINE_SCALE` comment.
+evaporates — see `nav/mcu_cycle_model.py`'s `DEADLINE_SCALE` comment.
 
 ## 2. Propulsion power (`analysis/power_estimate.py`)
 
 The simulator's own `propulsion_energy_j`/`propulsion_mean_power_w` columns
-use a single literature constant (EPM = 208.9 J/m, Kirschstein et al.) with
-no hover/drag/battery term — see `energy_monitor.py`. `power_estimate.py`
+(`sim/energy_monitor.py`) use a single literature constant (EPM = 208.9 J/m,
+Kirschstein et al.) with no hover/drag/battery term at all — for this
+airframe's mass it disagrees with the physics-grounded model below by
+roughly an order of magnitude (`epm_vs_physics_ratio` in
+`power_estimate.py`'s standalone deep-dive report is typically ~0.1, i.e.
+EPM estimates only ~10% of the physics model's power), because the EPM
+constant was fit to different, presumably lighter airframes and carries no
+mass/rotor-geometry term to account for that. This constant is therefore
+**not** exposed as this pipeline's propulsion energy/power figure — see §4 —
+it's kept only internally, as the source of each run's real horizontal
+distance traveled (`energy_j / 208.9`; exact, not an approximation, since
+the EPM accounting is a single constant multiply with no lossy step),
+which the physics model below needs and which `experiment_summary.csv`
+doesn't otherwise carry. `power_estimate.py`
 instead derives propulsion power from momentum (actuator-disk) theory:
 
 - **Hover induced power** (Rankine-Froude): `P = T^1.5 / sqrt(2*rho*A)`
@@ -126,7 +138,7 @@ instead derives propulsion power from momentum (actuator-disk) theory:
   non-negligible.
 - **Parasite drag power**: `P = 0.5 * rho * (Cd*A) * v^3`, swept over
   `CDA_FRONTAL_GRID_M2 = (0.3, 0.4, 0.5) m^2` as a sensitivity parameter
-  (cross-checked in magnitude against `physics.py`'s own `k2=0.04`
+  (cross-checked in magnitude against `sim/physics.py`'s own `k2=0.04`
   quadratic drag coefficient, Hattenberger et al. 2023).
 
 Ideal-aerodynamic power is converted to real electrical power via an
@@ -138,14 +150,14 @@ Reference specs used throughout (`FC30_*` constants):
 
 | Constant | Value |
 |---|---|
-| Empty mass | 65.0 kg (matches `physics.py`'s default `mass_kg`) |
+| Empty mass | 65.0 kg (matches `sim/physics.py`'s default `mass_kg`) |
 | Rotor count / diameter | 8 x 1.3716 m (54 in) |
 | Battery pack | 2x DB2000, 52.22 V x 38000 mAh = 3968.8 Wh total |
 | Hover endurance (empty, dual battery) | 29.0 min |
 
 ## 3. gem5 measurement methodology (native/ape_ops/gem5_bench/)
 
-`gem5_measured_latencies.py` is a GENERATED file — a real, regenerable
+`nav/gem5_measured_latencies.py` is a GENERATED file — a real, regenerable
 gem5 cycle-accurate measurement of the actual native APE planners
 (`native/ape_ops/src/ape1_bug.c`, `ape2_dwa.c`, `ape3_vfh.c`), not
 hand-authored numbers. There is no separate, higher-clocked
@@ -153,9 +165,9 @@ companion-computer measurement — always exactly one *active* profile.
 
 **Benchmark harness** (`native/ape_ops/gem5_bench/bench/`): `src/main.c`
 builds one fixed "open-corridor" LiDAR-style scan fixture (geometry/config
-matching this repo's live defaults — `Lidar2D` in `main.py`,
+matching this repo's live defaults — `Lidar2D` in `experiment/orchestrator.py`,
 `GoToConfig`/`AvoidCfg`/`RiskCfg`/`EventDecisionCfg`/`AlgoTuning` in
-`nav_algorithm.py`) and calls the selected planner
+`nav/algorithm.py`) and calls the selected planner
 (`ape1_bug_plan`/`ape2_dwa_plan`/`ape3_vfh_plan`) 200 times
 (`ITERATIONS`), bracketed by `m5_reset_stats()`/`m5_dump_stats()` so only
 the measured loop — not process/loader startup — is counted. One binary per
@@ -217,8 +229,8 @@ GEM5_ROOT=/path/to/gem5 python3 scripts/freeze_measured_latencies.py --profile c
 `--profile` defaults to `cortex_m4_168mhz`; pass any other profile name
 from `configs/` to switch which chip drives the live model (e.g.
 `--profile cortex_m7_400mhz` to go back to the old baseline for
-comparison). This rewrites `gem5_measured_latencies.py` at the repo root
-— including `CHIP`/`ACTIVE_MA`/`SLEEP_MA`/`VDD`, so `mcu_cycle_model.py`'s
+comparison). This rewrites `nav/gem5_measured_latencies.py`
+— including `CHIP`/`ACTIVE_MA`/`SLEEP_MA`/`VDD`, so `nav/mcu_cycle_model.py`'s
 power constants (§1) always match whichever chip's cycles it's reading —
 from a fresh 3-run study (one per planner), and archives a timestamped
 copy under `native/ape_ops/gem5_bench/out/frozen/<profile>.py` so past
@@ -227,10 +239,45 @@ any change to the native planner sources, a profile's parameters, or to
 switch the active CPU/algorithm. Run outputs (`stats.txt` etc.) land in
 `native/ape_ops/gem5_bench/out/mcu/<profile>/`.
 
+**One-command pipeline** (`scripts/switch_processor.py`): wraps the two
+steps above (build the bench binaries if missing, regenerate the latency
+table for a chosen profile) and prints a per-planner summary --
+gem5-measured latency (µs), the live deadline budget (ms,
+`DEADLINE_SCALE`-scaled), and active-power energy per single invocation
+(µJ):
+
+```
+GEM5_ROOT=/path/to/gem5 make switch-processor PROFILE=cortex_m7_400mhz
+GEM5_ROOT=/path/to/gem5 make switch-processor ARGS=--list   # list available profiles
+```
+
+The energy figure this prints is the *marginal, single-call* cost
+(`P_active * latency_us`), not a mission-averaged one -- that's what
+`nav/mcu_cycle_model.latency_to_energy_j()` computes automatically
+during a real `run.py` run, blending active and idle time over the
+mission's wall-clock duration.
+
 ## 4. Combined estimate (`analysis/statistics_analyzer.py`)
 
 Per-run compute power + physically-grounded propulsion power are combined
-into `total_power_w`, `energy_per_mission_kj`, and `endurance_min`
-(`FC30_BATTERY_WH_TOTAL * 3600 / total_power_w / 60`), aggregated per
-strategy (APE1/APE2/APE3/CA) alongside a sensitivity grid over the
-efficiency (`ETA_GRID`) and drag-area (`CDA_FRONTAL_GRID_M2`) parameters.
+into `total_power_w` and `energy_per_mission_kj`
+(`analysis/power_estimate.py::per_run_physical_metrics()`), aggregated per
+strategy (APE1/APE2/APE3/CA) and written to `strategy_summary_zone-mean.csv`
+as `compute_power_w_mean`, `propulsion_power_w_mean`, and
+`energy_per_mission_kj_median`/`_mean` -- the pipeline's canonical
+per-strategy summary, and the sole propulsion energy/power figure it
+surfaces (see §2 for why the EPM-based columns aren't shown here).
+`total_power_w` itself and `endurance_min` (`FC30_BATTERY_WH_TOTAL * 3600 /
+total_power_w / 60`) are computed internally but not surfaced in this
+summary: compute power is 4-5 orders of magnitude smaller than propulsion
+power for this airframe, so `total_power_w` is indistinguishable from
+`propulsion_power_w_mean` at typical display precision, and `endurance_min`
+barely varies by strategy for the same reason.
+
+The standalone deep-dive CLI (`analysis/power_estimate.py::run_power_estimate()`,
+writing `power_estimate_summary.csv`) shows the fuller picture instead --
+`total_power_w`, `endurance_min`, `epm_power_w_mean` (the EPM literature
+constant, for comparison), `epm_vs_physics_ratio_mean`, and a sensitivity
+grid over the efficiency (`ETA_GRID`) and drag-area (`CDA_FRONTAL_GRID_M2`)
+parameters. Run it directly: `python -c "from analysis.power_estimate import
+run_power_estimate; run_power_estimate()"`.

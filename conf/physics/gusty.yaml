@@ -1,0 +1,14 @@
+# @package _global_
+# description: Strong, fast-changing wind: high gust intensity.
+defaults:
+  - default
+  - _self_
+
+# Strong, fast-changing wind conditions -- higher gust intensity/magnitude
+# and a shorter OU correlation time (wind_tau_s) so gusts vary more rapidly.
+# Extends physics/default.yaml (see conf/run/smoke.yaml's comment for why the
+# `defaults` list here matters) so every physics-group field stays
+# present/overridable.
+wind_level_0to1: 0.9
+wind_accel_std_base_mps2: 1.6
+wind_tau_s: 0.7

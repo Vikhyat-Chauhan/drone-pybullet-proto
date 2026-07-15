@@ -1,0 +1,11 @@
+# @package _global_
+# description: Long benchmark sweep: 50 good runs in one invocation.
+defaults:
+  - default
+  - _self_
+
+# Long benchmark sweep preset: collect many good runs in one invocation
+# instead of the default single run. Extends run/default.yaml (see
+# smoke.yaml's comment for why the `defaults` list here matters) so every
+# run-group field stays present/overridable under this preset too.
+simulation_runs: 100

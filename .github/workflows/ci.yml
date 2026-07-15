@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache venv + native build
+        uses: actions/cache@v4
+        with:
+          path: |
+            venv
+            native/ape_ops/build
+          key: ${{ runner.os }}-drone-${{ hashFiles('requirements.txt', 'native/ape_ops/src/**', 'native/ape_ops/include/**', 'native/ape_ops/Makefile') }}
+
+      - name: Bootstrap (venv + deps + native build)
+        run: bash scripts/bootstrap.sh
+
+      # experiment/orchestrator.py's attempt loop (`while good_runs <
+      # cfg.simulation_runs`) retries indefinitely on a discarded attempt (a
+      # strategy failing to reach target) -- the `run=smoke` preset (2
+      # short-timeout runs) keeps this fast in the common case, and `timeout`
+      # is a second line of defense in case a pathological arena seed causes
+      # repeated discards.
+      - name: Headless smoke run
+        run: timeout 300 ./venv/bin/python run.py run=smoke
+
+      - name: Locate results CSVs
+        id: find_csv
+        run: |
+          out_dir=$(find outputs -mindepth 2 -maxdepth 2 -type d | sort | tail -n 1)
+          echo "out_dir=$out_dir" >> "$GITHUB_OUTPUT"
+          find "$out_dir" -name '*.csv'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: experiment-results
+          path: |
+            ${{ steps.find_csv.outputs.out_dir }}/logs/results/experiment_summary.csv
+            ${{ steps.find_csv.outputs.out_dir }}/logs/results/strategy_summary_zone-mean.csv

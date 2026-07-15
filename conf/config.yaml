@@ -1,0 +1,38 @@
+# description: Top-level composition root -- selects the default preset from each group below.
+# Top-level Hydra composition root for run.py.
+#
+# Selects one variant from each config group below, then this file's own
+# keys (via `_self_`) can add/override further. Every group file uses
+# `# @package _global_`, so all TeleopConfig field names land flat at the
+# top level here -- run.py converts the fully-composed config straight into
+# `TeleopConfig(**kwargs)` by matching field names, so nesting under a group
+# key would silently break that conversion.
+defaults:
+  - run: default
+  - sim: default
+  - events: default
+  - physics: default
+  - _self_
+
+# Not a TeleopConfig field -- read directly by run.py and passed to
+# experiment.orchestrator.main(gui=...). Defaults to headless, which is the
+# expected mode for scripted/CI/sweep use; pass `gui=true` on the command
+# line for the interactive PyBullet demo window.
+gui: false
+
+hydra:
+  job:
+    # Each run (or each multirun job) gets its own working directory, so
+    # TeleopConfig's relative path fields (log_path, results_csv_path,
+    # analyzer_out_dir, event_log_csv_path, target_json_path,
+    # nofly_meta_path) resolve inside that job's own folder instead of
+    # colliding across jobs -- see docs/CONFIGURATION.md for why this is
+    # safe (viz/world_builder.py's generated-texture cache uses
+    # __file__-derived absolute paths, so it stays shared across jobs
+    # regardless of this setting).
+    chdir: true
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}

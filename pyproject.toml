@@ -1,0 +1,7 @@
+[project]
+name = "drone-pybullet-proto"
+version = "0.1.0"
+requires-python = ">=3.12"
+
+[tool.setuptools]
+packages = ["sim", "nav", "viz", "experiment", "analysis", "applog"]

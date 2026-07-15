@@ -1,0 +1,10 @@
+# @package _global_
+# description: Coarser control loop: nav decisions at 50Hz.
+defaults:
+  - default
+  - _self_
+
+# Coarser, cheaper control loop. Extends sim/default.yaml (see
+# conf/run/smoke.yaml's comment for why the `defaults` list here matters) so
+# every sim-group field stays present/overridable.
+rate_hz: 50

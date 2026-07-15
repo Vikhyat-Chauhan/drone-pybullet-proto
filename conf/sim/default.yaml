@@ -1,0 +1,9 @@
+# @package _global_
+# description: Baseline PyBullet sim + 100Hz nav rate.
+# PyBullet sim + Nav/teleop rate fields from config.py::TeleopConfig --
+# literal copy of current defaults.
+flight_z: 3.0
+drone_radius_m: 0.7
+entity_name: drone1
+
+rate_hz: 100

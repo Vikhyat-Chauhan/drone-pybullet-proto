@@ -1,0 +1,14 @@
+# @package _global_
+# description: Frequent events, tighter deadlines -- high time pressure.
+defaults:
+  - default
+  - _self_
+
+# More frequent threat events with tighter reaction deadlines -- narrows the
+# log-uniform inter-arrival window and lowers deadline_alpha so the
+# APE1/APE2/APE3 race is under more time pressure. Extends events/default.yaml
+# (see conf/run/smoke.yaml's comment for why the `defaults` list here
+# matters) so every events-group field stays present/overridable.
+event_dt_min_s: 0.02
+event_dt_max_s: 1.0
+deadline_alpha: 0.5

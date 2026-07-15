@@ -3,14 +3,14 @@
 Log transformer for logs/run_logs.json (STRICT TeleopConfig version).
 
 Offline reconstruction of experiment_summary.csv from the raw JSON event
-log, independent of (and cross-checkable against) main.py's own direct
-CSV write via _flush_csv -- the runtime's primary path.
+log, independent of (and cross-checkable against) experiment/orchestrator.py's own
+direct CSV write via results_io.flush_csv -- the runtime's primary path.
 
 - Detects run boundaries as: collect EVENTs up to teleop's STOP record,
   then emits a row on the immediately following "main"-logger terminator
   {reached, elapsed, violations, energy_j, mean_power_w, compute_latency_us}
-  (see main.py's per-strategy loop in run_attempt()).
-- Requires at least one terminal EVENT (nav_algorithm.py logs type=
+  (see experiment/orchestrator.py's per-strategy loop in run_attempt()).
+- Requires at least one terminal EVENT (nav/algorithm.py logs type=
   RESOLVED on success, or DEADLINE/PREEMPTIVE/DEADLINE_PREEMPT on a
   violation; the non-terminal ARRIVAL record is not counted).
 - CSV columns (order preserved):
@@ -27,24 +27,21 @@ import json
 import csv
 
 # ---------- Shape helpers ----------
-# nav_algorithm.py's LidarTargetNavigatorCA._log("EVENT", type=<TYPE>, ...)
-# logs msg="EVENT" with the actual outcome carried in the top-level "type"
-# field (not in payload). ARRIVAL fires exactly once per real event, on
-# intake -- that's what main.py's own events_handled counter counts (see
-# self._events_handled += 1 in nav_algorithm.py). DEADLINE/PREEMPTIVE/
-# DEADLINE_PREEMPT are the terminal violation outcomes for a subset of
-# those same events (main.py's events_violated); RESOLVED (successful
-# resolution) is not separately counted in this schema -- "handled minus
-# violated" already implies it, matching main.py's own return tuple.
+# nav/algorithm.py's LidarTargetNavigatorCA._log("EVENT", type=<TYPE>, ...)
+# carries the outcome in the top-level "type" field, not payload. ARRIVAL
+# fires once per event on intake (= orchestrator's events_handled counter).
+# DEADLINE/PREEMPTIVE/DEADLINE_PREEMPT are terminal violation outcomes for a
+# subset of those events; RESOLVED isn't counted separately -- "handled
+# minus violated" already implies it.
 _EVENT_ARRIVAL_TYPE = "ARRIVAL"
 _EVENT_VIOLATION_TYPES = {"DEADLINE", "PREEMPTIVE", "DEADLINE_PREEMPT"}
 
 def _is_stop(rec: Dict[str, Any]) -> bool:
-    # teleop.py: self._logger.info({"event": "STOP"}) via logging.getLogger(__name__)
-    return rec.get("name") == "teleop" and isinstance(rec.get("msg"), dict) and rec["msg"].get("event") == "STOP"
+    # sim/teleop.py: self._logger.info({"event": "STOP"}); logger name is "sim.teleop".
+    return rec.get("name") == "sim.teleop" and isinstance(rec.get("msg"), dict) and rec["msg"].get("event") == "STOP"
 
 def _is_main_terminator(rec: Dict[str, Any]) -> bool:
-    # main.py: _main_logger = logging.getLogger("main"); see run_attempt()
+    # experiment/orchestrator.py: _main_logger = logging.getLogger("main"); see run_attempt()
     if rec.get("name") != "main":
         return False
     msg = rec.get("msg")
@@ -108,7 +105,7 @@ def transform(cfg: TransformCfg) -> List[Dict[str, Any]]:
             except Exception:
                 continue
 
-            # Required single POSES before nav per run (your guarantee)
+            # Required: one POSES record before nav per run.
             if _is_nav_start(rec):
                 payload = rec["payload"]
                 try:
@@ -244,13 +241,10 @@ def transform(cfg: TransformCfg) -> List[Dict[str, Any]]:
 
 # ---------- Public entrypoint: STRICT TeleopConfig ----------
 def run_from_cfg() -> List[Dict[str, Any]]:
-    # NOTE: deliberately NOT cfg.results_csv_path (logs/results/experiment_summary.csv)
-    # -- that file is main.py's own direct CSV output (_flush_csv, CSV_FIELDNAMES)
-    # and analysis/statistics_analyzer.py's canonical input; this tool's column
-    # schema is intentionally different (see module docstring), so writing to the
-    # same path would silently clobber the pipeline's real data with an
-    # incompatible schema. This output is for independently cross-checking the
-    # raw JSON log against that canonical CSV, not for replacing it.
+    # Deliberately NOT cfg.results_csv_path: that's orchestrator.py's own
+    # canonical CSV output (results_io.flush_csv) with a different schema
+    # (see module docstring) -- writing here would clobber it. This output
+    # is only for cross-checking the raw log against that canonical CSV.
     return transform(TransformCfg(
         input_log_path="logs/run_logs.json",
         output_csv_path="logs/results/experiment_summary_reconstructed.csv",

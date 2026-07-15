@@ -1,38 +1,25 @@
 # analysis/power_estimate.py
 """
-Real-world power/energy estimate for the modelled DJI FlyCart-30-class drone,
-combining:
+Real-world power/energy estimate for the modelled DJI FlyCart-30-class drone:
 
-  1. Compute power  — already physically grounded in the repo. Reuses the Fan,
-     Weber & Barroso (ISCA 2007) utilization power model and the single
-     low-power Cortex-M7-class MCU's active/idle power constants from
-     mcu_cycle_model.py, aggregated across all runs in experiment_summary.csv.
+  1. Compute power — Fan/Weber/Barroso (ISCA 2007) utilization model, using
+     the MCU active/idle power constants from mcu_cycle_model.py, aggregated
+     over experiment_summary.csv.
 
-  2. Propulsion power — the repo's existing propulsion_energy_j/mean_power_w
-     columns are a single literature constant (EPM = 208.9 J/m, Kirschstein et
-     al.) with no hover/drag/battery term (see energy_monitor.py).
-     This module instead derives propulsion power from momentum (actuator-disk)
-     theory + parasite drag, calibrated with an empirical efficiency factor
-     derived from the real DJI FlyCart 30 spec sheet (dji.com/flycart-30/specs),
-     and reports both a point estimate and a sensitivity range.
+  2. Propulsion power — derived from momentum (actuator-disk) theory +
+     parasite drag, calibrated against the real DJI FlyCart 30 spec sheet
+     (dji.com/flycart-30/specs), not the repo's existing EPM literature
+     constant (see energy_monitor.py / docs/POWER_MODEL.md §2 for why).
+     Induced power is speed-dependent (Glauert 1926 forward-flight extension,
+     Leishman "Principles of Helicopter Aerodynamics"): forward flight needs
+     less induced velocity than hover for the same thrust, which matters here
+     since simulated cruise speeds (~2-5 m/s) are the same order as this
+     airframe's hover induced velocity (~4.7 m/s).
 
-     Induced power is modelled as speed-dependent (Glauert's forward-flight
-     extension of momentum theory, 1926 — standard treatment in Leishman,
-     "Principles of Helicopter Aerodynamics", already cited above for the
-     hover case), not the constant hover-power floor used in the first pass
-     of this model: translational lift means a rotor disk needs LESS induced
-     velocity (and therefore less induced power) in forward flight than in
-     hover, for the same thrust. This matters here because the simulated
-     cruise speeds (~2-5 m/s) are the same order of magnitude as this
-     airframe's hover induced velocity (~4.7 m/s @ 65kg/11.82m^2), so the
-     effect is not negligible.
+  3. Combined total system power and flight endurance on the real 2x DB2000
+     battery pack (3968.8 Wh).
 
-  3. Combined real-world total system power and estimated flight endurance on
-     a real 2x DB2000 battery pack (3968.8 Wh).
-
-All formulas/constants are cited inline. See docs/POWER_MODEL.md for the
-provenance of the compute-power side of this model (gem5 measurement
-methodology, MCU datasheet constants) and the propulsion model.
+Formulas/constants cited inline; see docs/POWER_MODEL.md for full provenance.
 """
 
 from __future__ import annotations
@@ -48,17 +35,23 @@ import pandas as pd
 
 import sys as _sys, os as _os
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
-from mcu_cycle_model import (
+from nav.mcu_cycle_model import (
     _ACTIVE_POWER_W as MCU_ACTIVE_POWER_W,
     _IDLE_FRAC as MCU_IDLE_FRAC,
     _N_CORES as MCU_N_CORES,
 )
+from sim.energy_monitor import EPM_PRESETS
+
+# EnergyMonitor's default preset (never overridden). Used only to recover
+# each run's real distance traveled from propulsion_energy_j (= EPM_J_PER_M *
+# distance_m), not as a propulsion power model itself -- see
+# docs/POWER_MODEL.md §2.
+EPM_J_PER_M = EPM_PRESETS["flykart30"]
 
 # ---------------------------------------------------------------------------
-# DJI FlyCart 30 real-world reference specs (dji.com/flycart-30/specs).
-# Used as (a) the mass/rotor geometry for the momentum-theory model, and
-# (b) the empirical calibration anchor for ideal-aero -> real-electrical
-# efficiency, and (c) the battery capacity for endurance estimates.
+# DJI FlyCart 30 reference specs (dji.com/flycart-30/specs): mass/rotor
+# geometry for momentum theory, calibration anchor for ideal->real
+# efficiency, and battery capacity for endurance estimates.
 # ---------------------------------------------------------------------------
 FC30_MASS_EMPTY_KG: float = 65.0          # matches physics.py DronePhysics default mass_kg
 FC30_ROTOR_COUNT: int = 8
@@ -72,19 +65,15 @@ G_MPS2: float = 9.80665
 RHO_SEA_LEVEL: float = 1.225  # kg/m^3, ISA sea level
 
 # Effective flat-plate frontal drag area (Cd*A), literature-typical for a
-# large octocopter frame. Not measured for FlyCart-30-class airframes in this
-# repo; cross-checked in magnitude against the quadratic per-axis drag
-# coefficient k2=0.04 already used in physics.py
-# (cites Hattenberger et al. 2023 for the |v|v drag form). Swept as a
-# sensitivity parameter below rather than treated as a fixed value.
+# large octocopter; not measured for this airframe. Cross-checked in
+# magnitude against physics.py's k2=0.04 quadratic drag coefficient
+# (Hattenberger et al. 2023). Swept as a sensitivity parameter, not fixed.
 CDA_FRONTAL_GRID_M2 = (0.3, 0.4, 0.5)
 
-# Figure-of-merit / total hover efficiency grid. Multirotor FM is typically
-# 0.6-0.8 (rotor aerodynamic efficiency only); motor+ESC+propeller electrical
-# efficiency for small/mid multirotors is commonly cited around ~40% overall
-# (see hover-power validation literature, e.g. experimentally measured ~40%
-# efficiency quadrotor studies). We instead derive eta empirically below from
-# the real DJI spec sheet and sweep a band around it.
+# Total hover efficiency (ideal/real power) grid. Literature multirotor FM is
+# 0.6-0.8 (rotor-only); motor+ESC+prop electrical efficiency is commonly
+# cited ~40% overall. We instead derive eta empirically from the DJI spec
+# sheet (below) and sweep a band around it.
 ETA_GRID = (0.35, 0.45, 0.55)
 
 
@@ -114,17 +103,13 @@ def induced_velocity_forward_flight_mps(mass_kg: float, disk_area_m2: float,
                                          speed_mps: float, rho: float = RHO_SEA_LEVEL,
                                          iters: int = 60) -> float:
     """
-    Glauert's momentum theory for forward flight (1926) — the standard
-    extension of actuator-disk theory used to model translational lift
-    (Leishman, "Principles of Helicopter Aerodynamics", ch. 2). Solves the
-    implicit relation
+    Glauert's forward-flight extension of momentum theory (1926; Leishman
+    ch. 2). Solves the implicit relation
 
         v_i * sqrt(V^2 + v_i^2) = v_i_hover^2,   v_i_hover^2 = T / (2*rho*A)
 
-    for the induced velocity v_i at forward speed V, via fixed-point
-    iteration (converges quickly and monotonically for this well-behaved
-    functional form). At V=0 this reduces exactly to v_i_hover, matching
-    induced_hover_power_w's implied induced velocity.
+    for induced velocity v_i via fixed-point iteration (converges quickly,
+    monotonic). Reduces to v_i_hover at V=0, matching induced_hover_power_w.
     """
     thrust_n = mass_kg * G_MPS2
     vi_hover_sq = thrust_n / (2.0 * rho * disk_area_m2)
@@ -190,10 +175,10 @@ def _resolve(df: pd.DataFrame, col_name_expected: str) -> str:
     raise KeyError(f"Missing required column: '{col_name_expected}'. Found columns: {list(df.columns)}")
 
 
-def per_run_physical_metrics(df_raw: pd.DataFrame, target_distance_m: float) -> pd.DataFrame:
+def per_run_physical_metrics(df_raw: pd.DataFrame) -> pd.DataFrame:
     """
     Compute physically-grounded compute/propulsion/total power, per-mission
-    energy, and endurance for each row (run) of an experiment_summary-shaped
+    energy, and endurance for each run (row) of an experiment_summary-shaped
     dataframe. Index-aligned to df_raw (NaN rows dropped, so callers should
     join back by index, not assume positional alignment).
 
@@ -204,13 +189,13 @@ def per_run_physical_metrics(df_raw: pd.DataFrame, target_distance_m: float) -> 
     col_strategy = _resolve(df_raw, "strategy")
     col_elapsed = _resolve(df_raw, "elapse_time")
     col_compute_energy_j = _resolve(df_raw, "compute_energy_j")
-    col_epm_power_w = _resolve(df_raw, "propulsion_mean_power_w")
+    col_propulsion_energy_j = _resolve(df_raw, "propulsion_energy_j")
 
     df = pd.DataFrame({
         "strategy": df_raw[col_strategy].astype(str).str.strip(),
         "elapsed_s": pd.to_numeric(df_raw[col_elapsed], errors="coerce"),
         "compute_energy_j": pd.to_numeric(df_raw[col_compute_energy_j], errors="coerce"),
-        "epm_power_w": pd.to_numeric(df_raw[col_epm_power_w], errors="coerce"),
+        "propulsion_energy_j": pd.to_numeric(df_raw[col_propulsion_energy_j], errors="coerce"),
     }, index=df_raw.index)
     df = df.dropna(subset=["strategy", "elapsed_s"])
     df = df[df["elapsed_s"] > 0]
@@ -222,10 +207,19 @@ def per_run_physical_metrics(df_raw: pd.DataFrame, target_distance_m: float) -> 
     )
     df["u_eff"] = df["u_eff"].clip(lower=0.0, upper=1.0)
 
-    # --- (b) physically-grounded propulsion power per run (Glauert forward-
-    # flight induced power + parasite drag, calibrated against real DJI
-    # FlyCart 30 hover-power data — see module docstring / real_propulsion_power_w) ---
-    df["cruise_speed_mps"] = target_distance_m / df["elapsed_s"]
+    # --- (b) physically-grounded propulsion power per run (Glauert induced
+    # power + parasite drag, calibrated against DJI FlyCart 30 hover data --
+    # see module docstring / real_propulsion_power_w) ---
+    #
+    # Cruise speed uses each run's ACTUAL distance traveled, not
+    # cfg.target_distance (only a minimum used when picking the target --
+    # actual flown distance is routinely much larger). experiment_summary.csv
+    # has no distance column, but sim/energy_monitor.py already accumulated
+    # exact horizontal distance into propulsion_energy_j = EPM_J_PER_M * dist,
+    # so dividing back out recovers it exactly.
+    distance_traveled_m = df["propulsion_energy_j"] / EPM_J_PER_M
+    df["cruise_speed_mps"] = distance_traveled_m / df["elapsed_s"]
+    df["epm_power_w"] = df["propulsion_energy_j"] / df["elapsed_s"]  # for epm_vs_physics_ratio only
 
     eta_mid, _p_ideal_hover, _p_real_hover_fc30 = empirical_hover_efficiency()
     cda_mid = float(np.median(CDA_FRONTAL_GRID_M2))
@@ -251,13 +245,12 @@ def run_power_estimate() -> Dict[str, Any]:
 
     csv_path: str = cfg.results_csv_path
     out_dir: str = cfg.analyzer_out_dir
-    target_distance_m: float = float(cfg.target_distance)
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"CSV not found at {csv_path}")
     os.makedirs(out_dir, exist_ok=True)
 
     df_raw = pd.read_csv(csv_path)
-    df = per_run_physical_metrics(df_raw, target_distance_m)
+    df = per_run_physical_metrics(df_raw)
     eta_mid, p_ideal_hover, p_real_hover_fc30 = empirical_hover_efficiency()
 
     # --- per-strategy aggregation ---

@@ -1,13 +1,14 @@
-"""Async JSON logging setup shared by main.py's run loop.
+"""Async JSON logging setup shared by experiment/orchestrator.py's run loop.
 
 Attaches a queue-backed handler to the root logger so file (and optional
 console) writes happen on a background thread instead of blocking the sim
 loop. The JSON line shape matches what analysis/log_transformer.py expects
 to reconstruct experiment_summary.csv offline: each line carries "ts",
-"name" (the logger name -- "main", "teleop", "nav_algorithm", ...), "msg"
-(the raw record.msg, which is sometimes a dict, e.g. main.py's terminator
-record or teleop.py's {"event": "STOP"}), and whichever of "type",
-"payload", "strategy" were attached via logging's extra= kwarg.
+"name" (the logger name -- "main", "sim.teleop", "nav.algorithm", ...),
+"msg" (the raw record.msg, which is sometimes a dict, e.g.
+experiment/orchestrator.py's terminator record or sim/teleop.py's
+{"event": "STOP"}), and whichever of "type", "payload", "strategy" were
+attached via logging's extra= kwarg.
 """
 from __future__ import annotations
 
@@ -37,7 +38,7 @@ _EXTRA_FIELDS = ("type", "payload", "strategy")
 class _JsonFormatter(logging.Formatter):
     # Deliberately bypasses logging.Formatter's default getMessage()/%
     # formatting, which stringifies record.msg -- several callers log a
-    # dict directly (main.py's terminator, teleop.py's STOP record) and
+    # dict directly (experiment/orchestrator.py's terminator, sim/teleop.py's STOP record) and
     # log_transformer.py needs that structure intact after json.loads.
     def format(self, record: logging.LogRecord) -> str:
         entry = {"ts": record.created, "name": record.name, "msg": record.msg}

@@ -1,0 +1,19 @@
+# @package _global_
+# description: Baseline event mix/timing/deadlines.
+# Event Generator (B-style) fields from config.py::TeleopConfig -- literal
+# copy of current defaults.
+event_seed: 42
+event_deterministic: true
+
+event_dt_min_s: 0.02
+event_dt_max_s: 4.0
+
+event_mix_enemy: 0.33
+event_mix_obstacle: 0.33
+event_mix_lane: 0.34
+
+event_log_csv_path: logs/events_log.csv
+
+deadline_alpha: 0.85
+deadline_min_s: 0.147
+deadline_max_s: 3.50

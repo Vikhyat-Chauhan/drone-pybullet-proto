@@ -1,0 +1,25 @@
+# @package _global_
+# description: Fast CI sanity check: short mission, generous timeout.
+defaults:
+  - default
+  - _self_
+
+# Fast sanity-check preset used by `make smoke` and CI: a short mission
+# (small target_distance -- pick_target()'s min_dist_start, so the drone
+# only has to travel a short hop instead of the default ~150m traverse) with
+# a generous-enough timeout that it still reliably completes rather than
+# looping forever on discarded attempts. Not meant for real benchmark
+# numbers -- this only exercises the pipeline plumbing end to end.
+#
+# `defaults: [default, _self_]` above composes this preset ON TOP OF
+# run/default.yaml (Hydra's "extending configs within a group" pattern --
+# https://hydra.cc/docs/patterns/extending_configs/), so every run-group
+# field (world_gen_seed_offset, analyzer_strategies, ...) stays present and
+# overridable even when `run=smoke` is selected -- a plain sparse diff with
+# no `defaults` list would drop every field run/default.yaml doesn't share
+# with this file from the composed schema entirely (Hydra config groups are
+# a replacement, not a merge, unless a file explicitly extends its sibling
+# like this).
+simulation_runs: 1
+target_distance: 25
+simulation_timeout: 60

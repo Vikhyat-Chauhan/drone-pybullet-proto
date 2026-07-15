@@ -1,0 +1,13 @@
+# @package _global_
+# description: Infrequent, spaced-out events -- low time pressure.
+defaults:
+  - default
+  - _self_
+
+# Fewer, more spaced-out threat events -- widens the log-uniform
+# inter-arrival window (event_dt_min_s/event_dt_max_s in event_source.py).
+# Extends events/default.yaml (see conf/run/smoke.yaml's comment for why the
+# `defaults` list here matters) so every events-group field stays
+# present/overridable.
+event_dt_min_s: 1.0
+event_dt_max_s: 8.0

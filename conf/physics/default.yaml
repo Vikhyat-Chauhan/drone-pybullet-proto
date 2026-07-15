@@ -1,0 +1,28 @@
+# @package _global_
+# description: Baseline FlyCart-30-tuned wind/dynamics model.
+# Physics (feeds DronePhysics) fields from config.py::TeleopConfig -- literal
+# copy of current defaults ("baseline" FlyCart-30-tuned model).
+cmd_latency_s: 0.10
+wind_level_0to1: 0.5
+wind_accel_std_base_mps2: 0.8
+physics_seed: 42
+
+mass_kg: 65.0
+zeta_lin: 0.9
+wn_lin_rad: 6.0
+zeta_yaw: 0.9
+wn_yaw_rad: 5.0
+jerk_max_lin_mps3: 20.0
+jerk_max_yaw_rps3: 40.0
+drag_lin_per_s: 0.20
+drag_quad_per_m: 0.04
+max_tilt_deg: 30.0
+a_z_up_max_mps2: 4.0
+a_z_down_max_mps2: 5.0
+vz_up_max_mps: 5.0
+vz_down_max_mps: 3.0
+v_horiz_max_mps: 15.0
+v_horiz_abs_max_mps: 20.0
+max_ang_speed_rps: 1.2
+yaw_acc_max_rps2: 6.0
+wind_tau_s: 1.5

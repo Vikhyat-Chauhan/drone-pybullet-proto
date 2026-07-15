@@ -57,7 +57,7 @@ class TeleopConfig:
 
     # Inter-event gap is drawn log-uniformly from [event_dt_min_s, event_dt_max_s].
     # event_dt_min_s must stay <= rate_hz's tick period so a fast burst of
-    # events never silently skips a tick (see main.py's drive loop).
+    # events never silently skips a tick (see experiment/orchestrator.py's drive loop).
     event_dt_min_s: float = 0.02
     event_dt_max_s: float = 4.0
 

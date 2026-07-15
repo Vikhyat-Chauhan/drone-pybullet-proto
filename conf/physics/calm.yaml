@@ -1,0 +1,12 @@
+# @package _global_
+# description: Light wind: low gust intensity and magnitude.
+defaults:
+  - default
+  - _self_
+
+# Light-wind conditions -- lower gust intensity and magnitude. Extends
+# physics/default.yaml (see conf/run/smoke.yaml's comment for why the
+# `defaults` list here matters) so every physics-group field stays
+# present/overridable.
+wind_level_0to1: 0.15
+wind_accel_std_base_mps2: 0.3
