@@ -1,8 +1,9 @@
 /*
- * ape2_dwa.h — APE2: Dynamic Window Approach (Fox, Burgard & Thrun,
+ * ape2_dwa.h — Dynamic Window Approach (Fox, Burgard & Thrun,
  * "The Dynamic Window Approach to Collision Avoidance", IEEE Robotics &
- * Automation Magazine, 1997), scoped to a single 2D LiDAR scan (layer 0,
- * horizontal plane only) rather than a full 2D costmap.
+ * Automation Magazine, 1997). Takes single-layer (layer 0, horizontal
+ * plane only) or multi-layer LiDAR consensus (min range across all
+ * layers) depending on p->n_layers -- see ape2_dwa.c's multi-layer note.
  *
  * Samples a fixed dwa_n_v x dwa_n_w grid of (v, w) candidates, forward-
  * simulates each with a unicycle kinematic model, scores by weighted

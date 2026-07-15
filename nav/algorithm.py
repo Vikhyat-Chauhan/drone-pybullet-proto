@@ -137,7 +137,7 @@ class EventDecisionCfg:
 
 @dataclass
 class ApeAlgoCfg:
-    """Tuning for the native DWA (APE2) and VFH (APE3) planners, plus
+    """Tuning for the native VFH (APE2) and DWA (APE3) planners, plus
     multi-layer LiDAR geometry (mirrors the original model.sdf's <vertical>
     block, as plain numbers since there's no SDF here)."""
     n_layers: int = 5
@@ -197,6 +197,13 @@ class LidarTargetNavigatorCA:
         self._events_violated: int = 0
         self._events_violated_deadline: int = 0
         self._events_violated_preemptive: int = 0
+
+        self._tick_count: int = 0
+        self._avoiding_ticks: int = 0
+        self._commit_hold_ticks: int = 0
+        self._path_length: float = 0.0
+        self._last_pos: Optional[Tuple[float, float, float]] = None
+        self._evt_v_cmd_pre: float = 0.0
 
         self._drone_pose = drone_pose
         self._target_pose = target_pose
@@ -485,16 +492,17 @@ class LidarTargetNavigatorCA:
         return self._evt_put("APE1", r.v, r.wz, r.vz, r.score, ready_t)
 
     def _evt_plan_ape2(self, snap, budget_ms, arrival_sim_t):
-        # APE2 = DWA (native_api.c's ape_native_plan_ape2); single-layer
-        # scan is sufficient for its forward-simulated candidate scoring.
+        # APE2 = VFH (native_api.c's ape_native_plan_ape2); single-layer
+        # scan is sufficient for its polar-histogram valley search.
         params = self._build_ape_params(snap, multilayer=False)
         r = ape_native.plan_ape2(params)
         ready_t = arrival_sim_t + max(0.0, budget_ms) / 1000.0
         return self._evt_put("APE2", r.v, r.wz, r.vz, r.score, ready_t)
 
     def _evt_plan_ape3(self, snap, budget_ms, arrival_sim_t):
-        # APE3 = VFH (native_api.c's ape_native_plan_ape3); needs the
-        # multilayer scan its polar histogram bins over.
+        # APE3 = DWA (native_api.c's ape_native_plan_ape3); consumes the
+        # multilayer scan as a min-range consensus across layers in its
+        # forward-simulated candidate scoring (see ape2_dwa.c).
         params = self._build_ape_params(snap, multilayer=True)
         r = ape_native.plan_ape3(params)
         ready_t = arrival_sim_t + max(0.0, budget_ms) / 1000.0
@@ -591,11 +599,24 @@ class LidarTargetNavigatorCA:
         self._escape_until = 0.0
         self._evt_clear()
 
+        # -- diagnostic-only counters (not part of the public return tuple;
+        # pulled from run_logs.json's MISSION_STATS record for analysis) --
+        self._tick_count = 0
+        self._avoiding_ticks = 0
+        self._commit_hold_ticks = 0
+        self._path_length = 0.0
+        self._last_pos: Optional[Tuple[float, float, float]] = None
+
     def end_mission(self, reached: bool) -> Tuple[bool, float, float, float, int, int, int, int]:
         self._teleop.stop()
         elapsed = self._sim_time() - self._t_start
         total_latency_us, _ = self._cycle_meter.end()
         compute_energy_j = latency_to_energy_j(total_latency_us, elapsed)
+        self._log("MISSION_STATS", type="MISSION_STATS",
+                  tick_count=self._tick_count,
+                  avoiding_ticks=self._avoiding_ticks,
+                  commit_hold_ticks=self._commit_hold_ticks,
+                  path_length_m=round(self._path_length, 3))
         return (reached, elapsed, total_latency_us, compute_energy_j,
                 self._events_handled, self._events_violated,
                 self._events_violated_deadline, self._events_violated_preemptive)
@@ -626,6 +647,12 @@ class LidarTargetNavigatorCA:
         ex, ey, ez = (tx - x), (ty - y), (tz - z)
         dist_xy = math.hypot(ex, ey)
         dist = math.sqrt(ex*ex + ey*ey + ez*ez)
+
+        self._tick_count += 1
+        if self._last_pos is not None:
+            lx, ly, lz = self._last_pos
+            self._path_length += math.sqrt((x-lx)**2 + (y-ly)**2 + (z-lz)**2)
+        self._last_pos = (x, y, z)
 
         if not self._nav_start_logged:
             self._log("POSES", type="POSES",
@@ -710,6 +737,7 @@ class LidarTargetNavigatorCA:
                     "yaw_err": _wrap_pi(math.atan2(ey, ex) - yaw),
                     "cloud": self._cloud_provider.latest(),
                 }
+                self._evt_v_cmd_pre = v_cmd
 
                 # Each native call runs synchronously; availability is
                 # scheduled in sim-time (ready_t) -- see _evt_plan_ape1.
@@ -783,7 +811,10 @@ class LidarTargetNavigatorCA:
                     if not self._evt_resolved:
                         self._log("EVENT", type="RESOLVED",
                                   planner=winner_name,
-                                  ready_t=prop["ready_t"])
+                                  ready_t=prop["ready_t"],
+                                  v_pre=round(getattr(self, "_evt_v_cmd_pre", float("nan")), 3),
+                                  v_out=round(prop["v"], 3),
+                                  max_v=self._gc.max_v)
                         _running = (["APE1", "APE2", "APE3"]
                                     if self._edc.selector_mode == "CA"
                                     else [winner_name])
@@ -799,6 +830,7 @@ class LidarTargetNavigatorCA:
             hold_elapsed = self._sim_time() - self._evt_resolved_at
             if hold_elapsed < self._edc.commit_hold_s:
                 v_cmd, wz_cmd, vz_cmd = self._resolved_cmd
+                self._commit_hold_ticks += 1
             else:
                 self._commit_hold_active = False
 
@@ -809,6 +841,7 @@ class LidarTargetNavigatorCA:
             self._avoiding = False
         else:
             if self._avoiding:
+                self._avoiding_ticks += 1
                 if now < self._avoid_until or front < (effective_safe_m + self._ac.hysteresis_m):
                     v_cmd = 0.0
                     wz_cmd = self._avoid_sign * min(self._gc.max_wz, self._ac.turn_rate)

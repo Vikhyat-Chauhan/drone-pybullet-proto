@@ -22,10 +22,12 @@
 
 typedef struct {
     /* Raw scan data, flat array: layer-major, then angle-minor
-     * (ranges[layer * n_ranges + angle_idx]). n_layers == 1 for
-     * APE1/APE2 (horizontal-plane only); up to 5 for APE3 (multi-layer,
-     * fed from the PointCloud2-derived per-layer conversion — see
-     * nav_algorithm_T.py's _CloudSub / _build_ape_params). */
+     * (ranges[layer * n_ranges + angle_idx]). n_layers == 1 for the
+     * APE1/APE2 tiers (horizontal-plane only); up to 5 for the APE3 tier
+     * (multi-layer, fed from the PointCloud2-derived per-layer
+     * conversion — see algorithm.py's _build_ape_params). Which
+     * algorithm (DWA/VFH) runs in which tier is decided by native_api.c's
+     * dispatch, independent of this layer-count contract. */
     const float *ranges;
     int32_t n_ranges;          /* per-layer angle sample count */
     int32_t n_layers;
@@ -51,12 +53,12 @@ typedef struct {
     float sudden_obj_radius_m, sudden_obj_clearance_m;
     float curvature_k;
 
-    /* APE2 / Dynamic Window Approach */
+    /* Dynamic Window Approach (dwa.c) */
     int32_t dwa_n_v, dwa_n_w;   /* candidate grid resolution */
     float dwa_dt, dwa_horizon_s;
     float dwa_w_clear, dwa_w_heading, dwa_w_speed;
 
-    /* APE3 / Vector Field Histogram */
+    /* Vector Field Histogram (vfh.c) */
     int32_t vfh_n_sectors;      /* polar histogram resolution */
     float vfh_threshold;        /* obstacle-density threshold for "blocked" */
     float vfh_smax_sectors;     /* max valley width considered "wide" */

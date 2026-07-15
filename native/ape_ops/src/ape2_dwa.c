@@ -1,13 +1,23 @@
 /*
- * ape2_dwa.c — real Dynamic Window Approach. See ape2_dwa.h for the
- * reference and scoping notes.
+ * ape2_dwa.c — real Dynamic Window Approach (Fox, Burgard & Thrun, "The
+ * Dynamic Window Approach to Collision Avoidance", IEEE Robotics &
+ * Automation Magazine, 1997). See ape2_dwa.h for the reference and scoping
+ * notes.
  *
- * Op-count discipline: the (v,w) grid and per-candidate simulation step
- * count are both fixed by dwa_n_v/dwa_n_w/dwa_horizon_s/dwa_dt (config,
- * not data) — every candidate is fully simulated and scored regardless
- * of scan content, no early exit. This keeps the op count independent
- * of live sensor data, which is what makes a single offline gem5
- * measurement of this function valid for every future invocation.
+ * Multi-layer note: when fed multi-layer scan data (p->n_layers > 1),
+ * both the per-candidate obstacle lookup and the final stopping check
+ * take the min range across all layers (consensus: an obstacle in any
+ * layer counts), mirroring ape3_vfh.c's multi-layer stopping check. With
+ * n_layers == 1 this degenerates to single-layer (horizontal-plane-only)
+ * behavior.
+ *
+ * Op-count discipline: the (v,w) grid, per-candidate simulation step
+ * count, and per-step layer scan are all fixed by dwa_n_v/dwa_n_w/
+ * dwa_horizon_s/dwa_dt/n_layers (config, not data) — every candidate is
+ * fully simulated and scored regardless of scan content, no early exit.
+ * This keeps the op count independent of live sensor data, which is
+ * what makes a single offline gem5 measurement of this function valid
+ * for every future invocation.
  */
 #include "ape2_dwa.h"
 #include "ape_common.h"
@@ -19,6 +29,20 @@
 
 #define MAX_SIM_STEPS   16   /* hard cap; dwa_horizon_s/dwa_dt clamped to this */
 #define OBSTACLE_LOOKUP_HALF_DEG 3.0f
+
+/* Minimum range at (center_deg, half_deg) across every layer -- multi-
+ * layer consensus lookup shared by simulate_candidate and the final
+ * stopping check. Degenerates to a single ape_sector_min call when
+ * p->n_layers <= 1. */
+static float ape_sector_min_all_layers(const ape_params_t *p, float center_deg, float half_deg) {
+    float best = p->range_max + 1.0f;
+    int32_t n_layers = (p->n_layers > 1) ? p->n_layers : 1;
+    for (int32_t layer = 0; layer < n_layers; layer++) {
+        float r = ape_sector_min(p, layer, center_deg, half_deg);
+        if (r < best) best = r;
+    }
+    return best;
+}
 
 /* Forward-simulates one (v,w) candidate for the configured horizon,
  * returning the clearance (meters traveled before predicted collision,
@@ -39,7 +63,7 @@ static void simulate_candidate(const ape_params_t *p, float v, float w,
 
         float dist_from_origin = sqrtf(x * x + y * y);
         float bearing_deg = atan2f(y, x) * 180.0f / (float)M_PI;
-        float obstacle_range = ape_sector_min(p, 0, bearing_deg, OBSTACLE_LOOKUP_HALF_DEG);
+        float obstacle_range = ape_sector_min_all_layers(p, bearing_deg, OBSTACLE_LOOKUP_HALF_DEG);
 
         if (!collided) {
             if (obstacle_range - p->vehicle_radius_m < dist_from_origin) {
@@ -110,7 +134,7 @@ ape_result_t ape2_dwa_plan(const ape_params_t *p) {
     if (v_event_cap < v) v = v_event_cap;
     if (curv_cap < v) v = curv_cap;
 
-    float d_front = ape_sector_min(p, 0, 0.0f, (p->front_deg > 5.0f) ? p->front_deg : 5.0f);
+    float d_front = ape_sector_min_all_layers(p, 0.0f, (p->front_deg > 5.0f) ? p->front_deg : 5.0f);
     v = ape_stopping_limited_speed(v, d_front, p->max_decel_mps2, p->stop_margin_m);
 
     r.v = v;

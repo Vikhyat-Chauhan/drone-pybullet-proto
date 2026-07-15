@@ -1,6 +1,6 @@
 /*
  * main.c — gem5 cycle-accurate benchmark harness for the real native APE
- * planners (ape1_bug_plan / ape2_dwa_plan / ape3_vfh_plan — see
+ * planners (ape1_bug_plan / dwa_plan / vfh_plan — see
  * native/ape_ops/src/). Measures ONLY the planner call itself: the
  * m5_reset_stats()/m5_dump_stats() ROI bracket below wraps a fixed
  * ITERATIONS-call loop and nothing else, so process/loader/libc startup
@@ -110,8 +110,7 @@ static void build_fixture(ape_params_t *p) {
     p->sudden_obj_clearance_m = 0.3f;
 
     /* AlgoTuning: DWA (mirrors nav/algorithm.py's ApeAlgoCfg live
-     * defaults -- sized to keep this tier's real measured cost "medium",
-     * see that dataclass's docstring for why). */
+     * defaults). */
     p->dwa_n_v = 3;
     p->dwa_n_w = 3;
     p->dwa_dt = 0.3f;
@@ -137,11 +136,11 @@ int main(void) {
 #if APE_BENCH_TARGET == 1
         ape_result_t r = ape1_bug_plan(&params);
 #elif APE_BENCH_TARGET == 2
-        /* APE2 = DWA (native_api.c's ape_native_plan_ape2). */
-        ape_result_t r = ape2_dwa_plan(&params);
+        /* APE2 = VFH (native_api.c's ape_native_plan_ape2). */
+        ape_result_t r = vfh_plan(&params);
 #elif APE_BENCH_TARGET == 3
-        /* APE3 = VFH (native_api.c's ape_native_plan_ape3). */
-        ape_result_t r = ape3_vfh_plan(&params);
+        /* APE3 = DWA (native_api.c's ape_native_plan_ape3). */
+        ape_result_t r = dwa_plan(&params);
 #else
 #error "APE_BENCH_TARGET must be 1, 2, or 3"
 #endif

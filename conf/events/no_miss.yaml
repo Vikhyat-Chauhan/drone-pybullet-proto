@@ -1,0 +1,28 @@
+# @package _global_
+# description: Same event mix as default, but timing loosened so the
+# slowest planner (APE3) can never miss a deadline or get preempted --
+# isolates each APE's steady-state/ideal-case behavior for comparison
+# against the default (time-pressured) results.
+defaults:
+  - default
+  - _self_
+
+# APE3's emulated deadline budget is ~142.12ms (nav/mcu_cycle_model.py:
+# APE_LATENCY_US["APE3"] * DEADLINE_SCALE / 1000, see nav/gem5_measured_
+# latencies.py). Two things can make it "miss" under events/default.yaml:
+#   1. deadline_min_s floor (0.147s) sits right on top of that budget, so
+#      the clamp's lower bound alone can hand out deadlines APE3 can't
+#      make even with the whole race to itself.
+#   2. event_dt_min_s (0.02s) allows inter-arrival gaps far shorter than
+#      APE3's budget, so a new event can arrive and preempt an in-flight
+#      APE3 computation before it ever resolves.
+# Both are raised here to ~3.5x APE3's budget for margin against sim-time
+# jitter, so every event's deadline and every inter-arrival gap comfortably
+# exceeds APE3's worst case. event_dt_max_s widened proportionally to keep
+# the same log-uniform spread shape; deadline_alpha/event_mix/event_seed
+# are left untouched so the only thing that changed is timing headroom.
+event_dt_min_s: 0.5
+event_dt_max_s: 4.5
+deadline_alpha: 0.85
+deadline_min_s: 0.5
+deadline_max_s: 3.50

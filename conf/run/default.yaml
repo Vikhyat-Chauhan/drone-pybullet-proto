@@ -1,15 +1,15 @@
 # @package _global_
-# description: Single run, default world/logging settings (baseline).
+# description: 100 runs, default world/logging settings (baseline).
 # Run Options + World gen + Logging + Results&Analyzer + Generated-Sim-Selector
 # fields from config.py::TeleopConfig -- literal copy of its current defaults,
 # so selecting this preset (the default) reproduces today's out-of-the-box
 # behavior exactly.
-simulation_runs: 1
+simulation_runs: 100
 simulation_timeout: 200
 simulation_world_style: city  # perlin|city
 
-fixed_seed: true
-world_gen_seed_offset: 3412
+fixed_seed: false
+world_gen_seed_offset: 1234
 target_distance: 150
 
 log_path: logs/run_logs.json

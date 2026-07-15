@@ -1,7 +1,8 @@
 /*
- * ape3_vfh.c — real Vector Field Histogram with multi-layer consensus
- * and a single-pass valley search. See ape3_vfh.h for references and
- * scoping notes.
+ * ape3_vfh.c — real Vector Field Histogram (Borenstein & Koren, "The Vector
+ * Field Histogram — Fast Obstacle Avoidance for Mobile Robots", IEEE
+ * Trans. Robotics & Automation, 1991), with multi-layer consensus and a
+ * single-pass valley search. See ape3_vfh.h for references and scoping notes.
  *
  * Op-count discipline: histogram build is one fixed pass over
  * n_ranges * n_layers rays (every ray contributes some computation

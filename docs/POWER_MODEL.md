@@ -159,7 +159,7 @@ Reference specs used throughout (`FC30_*` constants):
 
 `nav/gem5_measured_latencies.py` is a GENERATED file — a real, regenerable
 gem5 cycle-accurate measurement of the actual native APE planners
-(`native/ape_ops/src/ape1_bug.c`, `ape2_dwa.c`, `ape3_vfh.c`), not
+(`native/ape_ops/src/ape1_bug.c`, `native/ape_ops/src/ape2_dwa.c`, `native/ape_ops/src/ape3_vfh.c`), not
 hand-authored numbers. There is no separate, higher-clocked
 companion-computer measurement — always exactly one *active* profile.
 

@@ -1,5 +1,5 @@
 # @package _global_
-# description: Fast CI sanity check: short mission, generous timeout.
+# description: Fast CI single run sanity check
 defaults:
   - default
   - _self_
@@ -21,5 +21,7 @@ defaults:
 # a replacement, not a merge, unless a file explicitly extends its sibling
 # like this).
 simulation_runs: 1
-target_distance: 25
-simulation_timeout: 60
+target_distance: 150
+simulation_timeout: 200
+fixed_seed: true
+world_gen_seed_offset: 1234

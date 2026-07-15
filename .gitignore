@@ -9,3 +9,5 @@ native/ape_ops/gem5_bench/bench/build/
 native/ape_ops/gem5_bench/out/
 outputs/
 multirun/
+gem5_bench/bench/build/
+gem5_bench/out/

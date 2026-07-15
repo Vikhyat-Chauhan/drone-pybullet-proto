@@ -2,8 +2,10 @@
 """
 freeze_measured_latencies.py — regenerates nav/gem5_measured_latencies.py
 from a fresh gem5 cycle-accurate run of the real native APE planners
-(ape1_bug_plan/ape2_dwa_plan/ape3_vfh_plan — native/ape_ops/src/) against
-a named CPU profile from ../configs/ (default: cortex_m4_168mhz.py,
+(ape1_bug_plan/dwa_plan/vfh_plan — native/ape_ops/src/; which of
+dwa_plan/vfh_plan runs under the "ape2"/"ape3" label is whatever
+native_api.c's ape_native_plan_ape2/ape_native_plan_ape3 dispatch to)
+against a named CPU profile from ../configs/ (default: cortex_m4_168mhz.py,
 STM32F405/Cortex-M4 @ 168MHz, this repo's target MCU; see
 docs/POWER_MODEL.md). Feeds both live deadline-feasibility timing
 (budget_ms) and compute-energy accounting.
@@ -67,7 +69,7 @@ Regenerate with:
 Raw per-invocation cycle counts from gem5 cycle-accurate simulation using
 an in-order MinorCPU @ {study.CPU_FREQ} (native/ape_ops/gem5_bench/configs/{profile_name}.py
 — an APPROXIMATION of {study.CHIP}; gem5 has no true M-profile CPU model)
-of the REAL native APE planners (ape1_bug_plan/ape2_dwa_plan/ape3_vfh_plan
+of the REAL native APE planners (ape1_bug_plan/dwa_plan/vfh_plan
 — native/ape_ops/src/), not a synthetic op-count proxy. Read from each
 profile's stats.txt ROI block (see main.c's m5_reset_stats/m5_dump_stats
 bracketing around one fixed open-corridor scan fixture).

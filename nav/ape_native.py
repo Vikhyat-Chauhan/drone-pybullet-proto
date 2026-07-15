@@ -1,9 +1,12 @@
 """
 ape_native.py — ctypes bridge to the native APE planners (native/ape_ops/):
-APE1 = reactive potential-field/Bug-style nudge, APE2 = Dynamic Window
-Approach, APE3 = Vector Field Histogram (increasing compute cost),
-dispatch matching ape2_dwa.c/ape3_vfh.c and gem5_measured_latencies.py's
-keys. These are the real decision algorithms, not a cost proxy -- no
+APE1 = reactive potential-field/Bug-style nudge (ape1_bug.c), APE2 =
+Vector Field Histogram (vfh.c, cheap tier: single-layer scan), APE3 =
+Dynamic Window Approach (dwa.c, heavy tier: multi-layer scan) -- the
+APE2/APE3 <-> algorithm binding lives in native_api.c's dispatch, not
+here or in gem5_measured_latencies.py (whose "ape2"/"ape3" keys track
+the tier's cycle budget, independent of which algorithm currently runs
+there). These are the real decision algorithms, not a cost proxy -- no
 planning logic lives in Python (see docs/POWER_MODEL.md).
 
 Build once, rebuild after switching target hardware (.so is

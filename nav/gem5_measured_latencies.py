@@ -10,10 +10,10 @@ using an in-order MinorCPU @ 168MHz (see
 native/ape_ops/gem5_bench/configs/cortex_m4_168mhz.py — an in-order
 MinorCPU APPROXIMATION of STM32F405, NOT a true M-profile simulation;
 gem5 has no M-profile CPU model) of the REAL native APE planners
-(ape1_bug_plan/ape2_dwa_plan/ape3_vfh_plan — see native/ape_ops/src/),
-not a synthetic op-count proxy. Read directly from each profile's
-stats.txt ROI block (see native/ape_ops/gem5_bench/bench/src/main.c for
-the m5_reset_stats/m5_dump_stats bracketing, against one fixed
+(ape1_bug_plan/ape2_dwa_plan/ape3_vfh_plan — see native/ape_ops/src/), not a
+synthetic op-count proxy. Read directly from each profile's stats.txt
+ROI block (see native/ape_ops/gem5_bench/bench/src/main.c for the
+m5_reset_stats/m5_dump_stats bracketing, against one fixed
 open-corridor scan fixture).
 
 This is the ACTIVE simulated CPU for this repo's power model: it feeds

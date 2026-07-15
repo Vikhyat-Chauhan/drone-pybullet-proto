@@ -1,5 +1,5 @@
 # @package _global_
-# description: Long benchmark sweep: 50 good runs in one invocation.
+# description: Long benchmark sweep: 1000 good runs in one invocation.
 defaults:
   - default
   - _self_
@@ -8,4 +8,6 @@ defaults:
 # instead of the default single run. Extends run/default.yaml (see
 # smoke.yaml's comment for why the `defaults` list here matters) so every
 # run-group field stays present/overridable under this preset too.
-simulation_runs: 100
+simulation_runs: 1000
+fixed_seed: false
+world_gen_seed_offset: 1234
