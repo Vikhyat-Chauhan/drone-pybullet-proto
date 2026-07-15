@@ -1,20 +1,22 @@
 /*
  * ape3_vfh.c — real Vector Field Histogram (Borenstein & Koren, "The Vector
  * Field Histogram — Fast Obstacle Avoidance for Mobile Robots", IEEE
- * Trans. Robotics & Automation, 1991), with multi-layer consensus and a
- * single-pass valley search. See ape3_vfh.h for references and scoping notes.
+ * Trans. Robotics & Automation, 1991), with a single-pass valley search.
+ * See ape3_vfh.h for references and scoping notes.
  *
- * Op-count discipline: histogram build is one fixed pass over
- * n_ranges * n_layers rays (every ray contributes some computation
+ * Op-count discipline: histogram build is one fixed pass over layer 0's
+ * n_ranges rays only (this tier's cheap/single-layer scan — see
+ * native_api.c's dispatch comment; every ray contributes some computation
  * regardless of its value); valley search is one fixed linear pass over
  * vfh_n_sectors bins. Neither loop's iteration count depends on scan
- * content, only on config (n_ranges/n_layers/vfh_n_sectors) — keeping a
- * single offline gem5 measurement valid for every future invocation.
+ * content, only on config (n_ranges/vfh_n_sectors) — keeping a single
+ * offline gem5 measurement valid for every future invocation. The final
+ * stopping check below is the one place this planner still consults every
+ * LiDAR layer directly (cheap, O(n_layers), for the immediate safety cap).
  */
 #include "ape3_vfh.h"
 #include "ape_common.h"
 #include <math.h>
-#include <stddef.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846f
@@ -46,9 +48,9 @@ ape_result_t ape3_vfh_plan(const ape_params_t *p) {
         min_range[s] = p->range_max + 1.0f;
     }
 
-    /* --- Histogram build: one fixed pass over every ray, every layer --- */
-    for (int32_t layer = 0; layer < p->n_layers; layer++) {
-        const float *row = p->ranges + (size_t)layer * (size_t)p->n_ranges;
+    /* --- Histogram build: one fixed pass over layer 0's rays only --- */
+    {
+        const float *row = p->ranges;   /* layer 0 — this tier's single-layer scan */
         for (int32_t i = 0; i < p->n_ranges; i++) {
             float d = row[i];
             float valid = (isfinite(d) && d > 0.0f) ? 1.0f : 0.0f;

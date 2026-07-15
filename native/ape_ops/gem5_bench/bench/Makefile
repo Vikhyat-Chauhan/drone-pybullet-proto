@@ -21,8 +21,8 @@ BUILD_DIR       := build
 
 ARM_CC          ?= arm-linux-gnueabihf-gcc
 
-COMMON_SRCS     := src/main.c $(APE_SRC_DIR)/ape1_bug.c $(APE_SRC_DIR)/dwa.c \
-                    $(APE_SRC_DIR)/vfh.c $(APE_SRC_DIR)/ape_common.c
+COMMON_SRCS     := src/main.c $(APE_SRC_DIR)/ape1_bug.c $(APE_SRC_DIR)/ape2_dwa.c \
+                    $(APE_SRC_DIR)/ape3_vfh.c $(APE_SRC_DIR)/ape_common.c
 COMMON_CFLAGS   := -O2 -static -I$(APE_INC_DIR) -I$(GEM5_ROOT)/include
 
 ARM_M5OP        := $(GEM5_ROOT)/util/m5/src/abi/arm/m5op.S

@@ -18,3 +18,7 @@ fi
 ./venv/bin/pip install -r requirements.txt
 
 make -C native/ape_ops native
+
+# gem5 itself (needed only by `make switch-processor`) is NOT built here --
+# it's a 30-60+ minute build, and nothing else in this pipeline needs it.
+# scripts/switch_processor.py builds it lazily, on first use, instead.

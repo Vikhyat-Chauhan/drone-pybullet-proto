@@ -18,16 +18,21 @@ command:
      a summary: per-planner latency (µs), live deadline budget (ms), and
      active-power energy per single invocation (µJ).
 
-Requires GEM5_ROOT (a gem5 checkout with build/ARM/gem5.opt built) and an
-ARM cross-compiler (arm-linux-gnueabihf-gcc) -- see docs/POWER_MODEL.md §3
-to build gem5 itself. Nothing downstream of nav/gem5_measured_latencies.py
-(the live simulator, `make smoke`) needs either; this pipeline only
-regenerates that one file.
+Needs an ARM cross-compiler (arm-linux-gnueabihf-gcc) on PATH -- that's a
+system package this script can't install for you. gem5 itself it handles:
+if GEM5_ROOT isn't set, it defaults to a repo-local checkout
+(_DEFAULT_GEM5_ROOT below) and is cloned + built automatically the first
+time it's needed (30-60+ minutes, one-time). Point GEM5_ROOT at an existing
+checkout to skip that. Nothing downstream of nav/gem5_measured_latencies.py
+(the live simulator, `make smoke`) needs gem5 at all; this pipeline only
+regenerates that one file. See docs/POWER_MODEL.md §3 for the manual
+step-by-step this wraps.
 
 Usage:
     python scripts/switch_processor.py --list
-    GEM5_ROOT=/path/to/gem5 python scripts/switch_processor.py --profile cortex_m7_400mhz
-    GEM5_ROOT=/path/to/gem5 python scripts/switch_processor.py            # uses the current default profile
+    python scripts/switch_processor.py --profile cortex_m7_400mhz
+    python scripts/switch_processor.py                              # uses the current default profile
+    GEM5_ROOT=/path/to/existing/gem5 python scripts/switch_processor.py --profile cortex_m7_400mhz
 """
 from __future__ import annotations
 
@@ -42,9 +47,21 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _GEM5_BENCH_DIR = _REPO_ROOT / "native" / "ape_ops" / "gem5_bench"
 _BENCH_DIR = _GEM5_BENCH_DIR / "bench"
 _SCRIPTS_DIR = _GEM5_BENCH_DIR / "scripts"
+_DEFAULT_GEM5_ROOT = _REPO_ROOT / ".gem5-build" / "gem5"
 
 sys.path.insert(0, str(_SCRIPTS_DIR))
 from run_gem5_study import available_profiles  # noqa: E402
+
+
+def _ensure_gem5_built() -> None:
+    gem5_root = Path(os.environ.get("GEM5_ROOT") or _DEFAULT_GEM5_ROOT)
+    if not (gem5_root / "build" / "ARM" / "gem5.opt").exists():
+        if not gem5_root.exists():
+            print(f"Cloning gem5 into {gem5_root} (one-time) ...")
+            subprocess.run(["git", "clone", "https://github.com/gem5/gem5.git", str(gem5_root)], check=True)
+        print("Building gem5 (this can take 30-60+ minutes, one-time) ...")
+        subprocess.run(["scons", "build/ARM/gem5.opt", f"-j{os.cpu_count() or 1}"], cwd=gem5_root, check=True)
+    os.environ["GEM5_ROOT"] = str(gem5_root)
 
 
 def _ensure_bench_binaries_built() -> None:
@@ -112,10 +129,7 @@ def main() -> None:
             print(name)
         return
 
-    if not os.environ.get("GEM5_ROOT"):
-        print("GEM5_ROOT must be set to a gem5 checkout with build/ARM/gem5.opt built.\n"
-              "See docs/POWER_MODEL.md §3 for how to build one.", file=sys.stderr)
-        sys.exit(1)
+    _ensure_gem5_built()
 
     profile = args.profile
     if profile is None:

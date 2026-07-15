@@ -13,11 +13,11 @@ void ape_native_plan_ape1(const ape_params_t *params, ape_result_t *out) {
  * cycle table (gem5_measured_latencies.py, keyed by "ape2"/"ape3") tracks
  * whichever algorithm is wired to each tier here. */
 void ape_native_plan_ape2(const ape_params_t *params, ape_result_t *out) {
-    *out = ape3_vfh_plan(params);
+    *out = ape2_dwa_plan(params);
 }
 
 void ape_native_plan_ape3(const ape_params_t *params, ape_result_t *out) {
-    *out = ape2_dwa_plan(params);
+    *out = ape3_vfh_plan(params);
 }
 
 int32_t ape_native_sizeof_params(void) { return (int32_t)sizeof(ape_params_t); }

@@ -28,7 +28,10 @@ sweep:
 
 # Switches the simulated flight-controller CPU and regenerates
 # nav/gem5_measured_latencies.py (latency + energy numbers) against it --
-# see scripts/switch_processor.py. Requires GEM5_ROOT.
+# see scripts/switch_processor.py. First run clones+builds gem5 into
+# .gem5-build/ automatically (30-60+ min, one-time); needs
+# arm-linux-gnueabihf-gcc on PATH. Set GEM5_ROOT to reuse an existing
+# checkout instead.
 #   make switch-processor PROFILE=cortex_m7_400mhz
 #   make switch-processor ARGS=--list
 switch-processor:

@@ -74,7 +74,7 @@ whichever chip the cycle counts were actually measured against — see §3.
 
 The raw gem5 numbers alone are not the realistic figure here. An idle
 Cortex-M4 running only the APE call would clear even APE3's raw budget
-(~152 µs) trivially against this sim's 147-650 ms threat deadlines —
+(~120 µs) trivially against this sim's 147-650 ms threat deadlines —
 neither ISR entry (tens of ns) nor a full FreeRTOS scheduling tick
 (~1 ms) comes close to mattering at that timescale. Taken bare-metal, the
 deadline race would be moot: APE3 would win essentially every time.
@@ -90,7 +90,7 @@ those other tasks directly — and is the actual free modeling parameter
 here, not the underlying gem5 cycle counts.
 
 At `DEADLINE_SCALE=1000`, `budget_ms` comes out to roughly **APE1 ≈
-7.1 ms, APE2 ≈ 73.2 ms, APE3 ≈ 151.6 ms**. Published UAV
+6.6 ms, APE2 ≈ 40.9 ms, APE3 ≈ 119.5 ms**. Published UAV
 obstacle-avoidance literature gives a useful sanity check for whether
 that's a *plausible* contention level, not a proof of it: Falanga, Kim &
 Scaramuzza (*Dynamic obstacle avoidance for quadrotors with event
@@ -98,8 +98,8 @@ cameras*, Science Robotics, 2020) report that "today's autonomous drones
 have reaction times of tens of milliseconds," and cite field measurements
 putting UAS at typical cruise speeds (10-15 m/s) under roughly a 500 ms
 total detect→classify→respond budget before a collision becomes
-unavoidable. APE1's ~7.1 ms budget sits comfortably inside that window;
-APE3's ~151.6 ms budget consumes a meaningful fraction of it, leaving
+unavoidable. APE1's ~6.6 ms budget sits comfortably inside that window;
+APE3's ~119.5 ms budget consumes a meaningful fraction of it, leaving
 less margin for sensing/classification latency ahead of it. That's the
 concrete justification for this sim's APE1/2/3 racing-selector design
 (cascade through faster, lower-quality planners as the deadline tightens,
@@ -217,7 +217,10 @@ real, which is why each profile is measured with its own gem5 run rather
 than hand-scaling one baseline's cycle counts by a frequency ratio.
 
 **Regenerating the latency table** (requires a gem5 checkout with
-`build/ARM/gem5.opt` built — `cd $GEM5_ROOT && scons build/ARM/gem5.opt`):
+`build/ARM/gem5.opt` built — `cd $GEM5_ROOT && scons build/ARM/gem5.opt`;
+`scripts/switch_processor.py` below does this for you automatically into
+`.gem5-build/gem5/` the first time it's needed, so manually running these
+two commands is normally unnecessary):
 
 ```
 cd native/ape_ops/gem5_bench/bench
@@ -239,16 +242,20 @@ any change to the native planner sources, a profile's parameters, or to
 switch the active CPU/algorithm. Run outputs (`stats.txt` etc.) land in
 `native/ape_ops/gem5_bench/out/mcu/<profile>/`.
 
-**One-command pipeline** (`scripts/switch_processor.py`): wraps the two
-steps above (build the bench binaries if missing, regenerate the latency
-table for a chosen profile) and prints a per-planner summary --
-gem5-measured latency (µs), the live deadline budget (ms,
-`DEADLINE_SCALE`-scaled), and active-power energy per single invocation
-(µJ):
+**One-command pipeline** (`scripts/switch_processor.py`): wraps everything
+above (build gem5 itself if missing, build the bench binaries if missing,
+regenerate the latency table for a chosen profile) and prints a
+per-planner summary -- gem5-measured latency (µs), the live deadline
+budget (ms, `DEADLINE_SCALE`-scaled), and active-power energy per single
+invocation (µJ). No env var required for a first-time run — gem5 is
+cloned and built into `.gem5-build/gem5/` automatically (30-60+ minutes,
+one-time); set `GEM5_ROOT` to point at an existing checkout instead if you
+have one. Either way this still needs `arm-linux-gnueabihf-gcc` on PATH:
 
 ```
-GEM5_ROOT=/path/to/gem5 make switch-processor PROFILE=cortex_m7_400mhz
-GEM5_ROOT=/path/to/gem5 make switch-processor ARGS=--list   # list available profiles
+make switch-processor PROFILE=cortex_m7_400mhz
+make switch-processor ARGS=--list                          # list available profiles
+GEM5_ROOT=/path/to/existing/gem5 make switch-processor PROFILE=cortex_m7_400mhz
 ```
 
 The energy figure this prints is the *marginal, single-call* cost
