@@ -138,11 +138,11 @@ int main(void) {
 #if APE_BENCH_TARGET == 1
         ape_result_t r = ape1_bug_plan(&params);
 #elif APE_BENCH_TARGET == 2
-        /* APE2 = VFH (native_api.c's ape_native_plan_ape2). */
-        ape_result_t r = ape3_vfh_plan(&params);
-#elif APE_BENCH_TARGET == 3
-        /* APE3 = DWA (native_api.c's ape_native_plan_ape3). */
+        /* APE2 = DWA (native_api.c's ape_native_plan_ape2). */
         ape_result_t r = ape2_dwa_plan(&params);
+#elif APE_BENCH_TARGET == 3
+        /* APE3 = VFH (native_api.c's ape_native_plan_ape3). */
+        ape_result_t r = ape3_vfh_plan(&params);
 #else
 #error "APE_BENCH_TARGET must be 1, 2, or 3"
 #endif

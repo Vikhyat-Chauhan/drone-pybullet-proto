@@ -486,17 +486,19 @@ class LidarTargetNavigatorCA:
         return self._evt_put("APE1", r.v, r.wz, r.vz, r.score, ready_t)
 
     def _evt_plan_ape2(self, snap, budget_ms, arrival_sim_t):
-        # APE2 = VFH (native_api.c's ape_native_plan_ape2); single-layer
-        # scan is sufficient for its polar-histogram valley search.
+        # APE2 = DWA (native_api.c's ape_native_plan_ape2); called here with
+        # multilayer=False, which degenerates its multi-layer min-range
+        # consensus lookup to single-layer (see ape2_dwa.c).
         params = self._build_ape_params(snap, multilayer=False)
         r = ape_native.plan_ape2(params)
         ready_t = arrival_sim_t + max(0.0, budget_ms) / 1000.0
         return self._evt_put("APE2", r.v, r.wz, r.vz, r.score, ready_t)
 
     def _evt_plan_ape3(self, snap, budget_ms, arrival_sim_t):
-        # APE3 = DWA (native_api.c's ape_native_plan_ape3); consumes the
-        # multilayer scan as a min-range consensus across layers in its
-        # forward-simulated candidate scoring (see ape2_dwa.c).
+        # APE3 = VFH (native_api.c's ape_native_plan_ape3); its polar-
+        # histogram valley search only reads layer 0's rays, but the
+        # multilayer scan here also feeds its final per-layer stopping
+        # check (see ape3_vfh.c).
         params = self._build_ape_params(snap, multilayer=True)
         r = ape_native.plan_ape3(params)
         ready_t = arrival_sim_t + max(0.0, budget_ms) / 1000.0
