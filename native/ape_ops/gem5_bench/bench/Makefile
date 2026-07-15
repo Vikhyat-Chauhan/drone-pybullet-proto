@@ -5,8 +5,7 @@
 # (gem5 has no true M-profile CPU model; this is deliberately a standard
 # ARM/glibc SE-mode binary run under an in-order MinorCPU config,
 # matching the approximation ../configs/cortex_m7_inorder.py documents)
-# — representative of a low-compute drone's flight-controller-class MCU,
-# not a separate higher-power companion computer.
+# — representative of a low-compute drone's flight-controller-class MCU.
 #
 # Requires GEM5_ROOT (path to a gem5 checkout with `include/gem5/m5ops.h`
 # and `util/m5/src/abi/arm/m5op.S`) and arm-linux-gnueabihf-gcc.

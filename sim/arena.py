@@ -1,6 +1,5 @@
-"""Procedural NFZ arena generation: city-grid and Perlin-noise modes, ported
-from CANavigator's arena_generator_{city,perlin}.py (self-contained, no
-Gazebo SDF -- rectangles are plain Building dataclasses; write_meta() emits
+"""Procedural NFZ arena generation: city-grid and Perlin-noise modes
+rectangles are plain Building dataclasses; write_meta() emits
 the JSON format sim/violations.py::load_rects() consumes).
 
 These rectangles are a horizontal no-fly-zone *scoring overlay*, not
@@ -17,7 +16,7 @@ import numpy as np
 from noise import pnoise2
 
 
-# Flat NFZ slab height (matches CANavigator's Z_THICK/Z_EPS): every rectangle
+# Flat NFZ slab height: every rectangle
 # gets the same uniform z-extent since these are a scoring overlay, not
 # literal building models.
 LEGACY_Z_SIZE = 5.0
@@ -35,9 +34,7 @@ class Building:
 
 @dataclass
 class ArenaCfg:
-    # Domain + city-grid knobs restored to match CANavigator's
-    # ArenaGenCfg/arena_generator_city.py exactly -- they were never meant
-    # to be tuned down for this port.
+    # Domain + city-grid knobs
     x_min: float = -100.0
     x_max: float = 100.0
     y_min: float = -50.0
@@ -131,7 +128,7 @@ class CityLayout:
 
 
 def generate_city_layout(cfg: ArenaCfg) -> CityLayout:
-    """Ported from _NoFlyCity.run(): road lines carve the domain into blocks,
+    """Road lines carve the domain into blocks,
     blocks are inset by road-half-width + sidewalk setback, each block is
     tiled into lots, each lot independently filled with probability
     fill_prob. Also records road/pavement/grass rectangles for rendering.
@@ -206,8 +203,8 @@ def generate_buildings(cfg: ArenaCfg) -> list[Building]:
 def pick_start_target(cfg: ArenaCfg, buildings: list[Building], seed_offset: int = 1,
                        min_dist: float = 30.0):
     """Kept for the earlier verification scripts / quick prototyping.
-    For the real orchestrator, prefer pick_target() below, which ports
-    CANavigator's two-phase (random-sample + deterministic-grid-fallback)
+    For the real orchestrator, prefer pick_target() below, which uses
+    two-phase (random-sample + deterministic-grid-fallback)
     target picker -- this one can silently return (0,0) if unlucky."""
     rng = random.Random(cfg.seed + seed_offset)
 
@@ -251,9 +248,8 @@ class PerlinArenaCfg:
 
 
 def generate_buildings_perlin(cfg: PerlinArenaCfg) -> List[Building]:
-    """Ported from arena_generator_perlin.py's _NoFly: sample 2D Perlin
-    noise over a grid, threshold by density quantile, greedily merge into
-    maximal axis-aligned rectangles."""
+    """ sample 2D Perlin noise over a grid, threshold by density quantile, 
+    greedily merge into maximal axis-aligned rectangles."""
     xs = np.arange(cfg.x_min, cfg.x_max, cfg.cell_m, dtype=float)
     ys = np.arange(cfg.y_min, cfg.y_max, cfg.cell_m, dtype=float)
 
@@ -315,8 +311,7 @@ def pick_target(x_min: float, x_max: float, y_min: float, y_max: float,
                  seed: int, radius: float = 0.6, margin_walls: float = 5.0,
                  margin_rect: float = 1.0, min_dist_start: float = 25.0,
                  max_tries: int = 5000) -> Tuple[float, float]:
-    """Ported from arena_generator_{city,perlin}.py's _Target._pick_xy:
-    random sampling (rejecting points inside any NFZ rect inflated by a
+    """random sampling (rejecting points inside any NFZ rect inflated by a
     margin, and within min_dist_start of start_xy) up to max_tries, then a
     deterministic grid-scan fallback so dense arenas can't fail silently."""
     rnd = random.Random(seed)
@@ -357,8 +352,7 @@ def pick_target(x_min: float, x_max: float, y_min: float, y_max: float,
 
 def write_nofly_meta(path: str, x_min: float, x_max: float, y_min: float, y_max: float,
                       buildings: List[Building], seed: int, mode: str = "city") -> None:
-    """Same JSON shape CANavigator's arena_generator_*.py::_write_meta()
-    produced (minus the Gazebo SDF), so violations.py::load_rects() ports
+    """_write_meta() produced (minus the Gazebo SDF), so violations.py::load_rects() ports
     with zero parsing changes."""
     meta = {
         "x_min": float(x_min), "x_max": float(x_max),

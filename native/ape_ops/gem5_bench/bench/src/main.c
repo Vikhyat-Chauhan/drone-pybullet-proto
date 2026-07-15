@@ -20,6 +20,7 @@
  * *content* (see each planner's own header comment), so the exact
  * range values only need to be plausible, not tuned per-planner.
  */
+
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -110,8 +111,7 @@ static void build_fixture(ape_params_t *p) {
     p->sudden_obj_clearance_m = 0.3f;
 
     /* AlgoTuning: DWA (mirrors nav/algorithm.py's ApeAlgoCfg live
-     * defaults -- sized to keep this tier's real measured cost "medium",
-     * see that dataclass's docstring for why). */
+     * defaults -- sized to keep this tier's real measured cost "medium" */
     p->dwa_n_v = 3;
     p->dwa_n_w = 3;
     p->dwa_dt = 0.3f;

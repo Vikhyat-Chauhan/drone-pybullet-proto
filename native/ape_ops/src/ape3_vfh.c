@@ -120,9 +120,7 @@ ape_result_t ape3_vfh_plan(const ape_params_t *p) {
     float conf = ape_clampf(0.5f * clear_conf + 0.5f * align_conf, 0.0f, 1.0f);
 
     /* Speed cap uses v_cap_frac (the same event-response ceiling APE1/
-     * APE2 use), not sidestep_speed_frac — that field is a vestige of
-     * the pre-VFH "confidence-weighted sidestep heuristic" APE3 used to
-     * be (see docs/POWER_MODEL.md); real VFH is meant to afford
+     * APE2 use); real VFH is meant to afford
      * a full-quality plan, not an inherited sidestep-speed throttle. */
     float v_cap_eff = ape_clampf(p->v_cap_frac + 0.2f * conf, 0.0f, 0.95f);
     float base_v = ape_clampf(p->v_cmd, 0.0f, v_cap_eff * p->max_v);

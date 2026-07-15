@@ -8,8 +8,7 @@
  * the paper's "fast but least accurate" role for APE1.
  *
  * Tuning constants below (K_REPULSION, side-window geometry, SLOW_FRAC)
- * have no external citation — they're modeler's choices, empirically
- * tunable against the sim, not datasheet facts.
+ * 
  */
 #include "ape1_bug.h"
 #include "ape_common.h"

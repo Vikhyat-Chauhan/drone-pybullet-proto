@@ -12,13 +12,7 @@ F4-class flight controllers. Same gem5-approximation caveats apply as
 cortex_m7_400mhz.py: gem5 has no true M-profile CPU model, so this uses
 the same in-order MinorCPU "minor" preset (architecturally the right
 *shape* — in-order, single-issue, no speculation — for a Cortex-M4
-core) at a different --cpu-freq. An empirical check in this repo
-(rerunning bench_ape1 at 168MHz vs. 400MHz) found gem5's measured
-numCycles shifts by only ~0.13% between the two frequencies (memory
-access latency is modeled in fixed ns and converted to core-clock
-cycles, so it's not perfectly frequency-invariant) — small, but real,
-which is why this profile is measured via its own gem5 run rather than
-a post-hoc scalar applied to the 400MHz cycle counts.
+core) at a different --cpu-freq.
 
 This module holds ONLY the parameters for one gem5 CPU study (timing +
 power) — see ../scripts/run_gem5_study.py for how it's invoked, and
