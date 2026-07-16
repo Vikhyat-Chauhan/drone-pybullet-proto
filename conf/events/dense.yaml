@@ -9,6 +9,24 @@ defaults:
 # APE1/APE2/APE3 race is under more time pressure. Extends events/default.yaml
 # (see conf/run/smoke.yaml's comment for why the `defaults` list here
 # matters) so every events-group field stays present/overridable.
-event_dt_min_s: 0.02
-event_dt_max_s: 1.0
+# Values here are milliseconds (config-facing; see conf/events/default.yaml's
+# comment for why -- converted to seconds at the EventCfg boundary in
+# experiment/orchestrator.py).
+# This is the narrowest window in the events group. event_dt_min_ms=40ms
+# structurally clears nav/algorithm.py's nav-tick period (GoToConfig.
+# rate_hz=1000Hz, ~1ms -- was 30Hz/~33.3ms when this value was chosen; see
+# nav/algorithm.py's GoToConfig.rate_hz comment) with enormous margin --
+# see conf/events/default.yaml's comment for why that's the binding
+# constraint (same-tick event-batch preemption, not any APE's own compute
+# budget; APE1 is ~0.14ms, utterly dwarfed by the nav-tick period either
+# way). event_dt_max_ms keeps only ~2.4x margin over APE3's budget
+# (~412.4ms, cortex_m3_8mhz.py -- see docs/POWER_MODEL.md), down from
+# ~51x under the older, faster cortex_m4_168mhz.py profile -- deliberately
+# tight: "dense" tightens deadline_alpha's time pressure specifically so
+# APE3 solo frequently can't even get selected before the next event
+# preempts it, which is the intended stress case for this preset now that
+# APE3's budget is physically meaningful. Re-check both ratios after any
+# native planner or CPU profile change (`make switch-processor`).
+event_dt_min_ms: 40.0
+event_dt_max_ms: 1000.0
 deadline_alpha: 0.5

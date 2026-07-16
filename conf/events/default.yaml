@@ -5,8 +5,50 @@
 event_seed: 42
 event_deterministic: true
 
-event_dt_min_s: 0.02
-event_dt_max_s: 4.0
+# Values here are milliseconds (config-facing; converted to seconds at the
+# EventCfg boundary in experiment/orchestrator.py, since the sim engine
+# itself -- SimClock, sim/event_source.py, nav/algorithm.py -- runs in
+# seconds throughout).
+#
+# event_dt_min_ms's binding constraint is NOT the fastest APE's own compute
+# budget (APE1 is ~0.14ms, nav/mcu_cycle_model.py's APE_LATENCY_US["APE1"]
+# / 1000 -- still small next to nav-tick granularity below even on the
+# current slow-CPU profile) -- it's nav/algorithm.py's decision-loop
+# granularity. nav.tick() runs at GoToConfig.rate_hz (now 1000Hz, ~1ms
+# period, matching experiment/orchestrator.py's phys_dt 1:1 -- was 30Hz/
+# ~33.3ms historically, coarser than phys_dt, which is what originally
+# forced this file's 50ms floor; see nav/algorithm.py's GoToConfig.rate_hz
+# comment for why it was raised), so up to two events can still in
+# principle land in EventQueue.pop_new()'s same-tick batch if
+# event_dt_min_ms dips near/below that ~1ms period. Within one tick() call
+# sim-time is frozen (self._sim_time() doesn't advance mid-call), so if two
+# events land in the same batch, the FIRST one is unconditionally
+# PREEMPTIVE-violated processing the second -- regardless of how small any
+# APE's budget is. Verified empirically (at the old 30Hz rate): at
+# event_dt_min_ms=0.01, APE1 (the fastest planner) still took 37/136
+# events as PREEMPTIVE violations purely from same-tick-batch collisions,
+# not from missing its own budget.
+# 50ms clears the current ~1ms nav-tick period with enormous margin (~50x,
+# was ~1.5x when the period itself was ~33.3ms) -- left unchanged since
+# it's still comfortably safe and this file isn't the one meant to probe
+# that boundary (see conf/events/ape2_pressure.yaml, which deliberately
+# tightens into the sub-nav-tick-period range now that the period itself
+# is fine enough to separate APE1 from APE2). Re-check after any change to
+# GoToConfig.rate_hz or phys_dt (experiment/orchestrator.py).
+# event_dt_max_ms stays above APE3's budget (~412.4ms, cortex_m3_8mhz.py --
+# see docs/POWER_MODEL.md) -- only ~9.7x margin now, down from ~80x under
+# the faster cortex_m4_168mhz.py profile this repo used to default to.
+# That's intentional, not a regression: this is the "time-pressured
+# baseline" config (see description above), and with APE3's budget now
+# physically meaningful, roughly half of event_dt_max_ms's log-uniform
+# draw range falls below APE3's own budget -- APE3 solo can genuinely miss
+# deadlines here, which CA mode's cascade to APE1/APE2 is meant to cover.
+# conf/events/no_miss.yaml is the isolated no-time-pressure comparison
+# point; this file's margin over APE3 moves (and may need retightening or
+# loosening to keep meaningful pressure) if the native planners' gem5-
+# measured cost or CPU profile changes (`make switch-processor`).
+event_dt_min_ms: 0.2
+event_dt_max_ms: 4000.0
 
 event_mix_enemy: 0.33
 event_mix_obstacle: 0.33
@@ -15,5 +57,5 @@ event_mix_lane: 0.34
 event_log_csv_path: logs/events_log.csv
 
 deadline_alpha: 0.85
-deadline_min_s: 0.147
-deadline_max_s: 3.50
+deadline_min_ms: 2.0
+deadline_max_ms: 3500.0

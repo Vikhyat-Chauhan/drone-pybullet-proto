@@ -28,26 +28,34 @@ E = P * wall_s
 U_eff = (total_latency_us * 1e-6) / (wall_s * N_cores)
 ```
 
-**Active profile: STM32F405, Cortex-M4 @ 168 MHz** (`DS8626` Rev 9). This
-replaced an earlier STM32H743/Cortex-M7 @ 400 MHz baseline: the H743 is
-one of ST's higher-end M-series parts, not representative of what
-actually flies. The F405 is the real, widely-documented chip used in
-low-compute drones doing onboard obstacle avoidance — the Bitcraze
-Crazyflie 2.x nano-drone, and the most common Betaflight/PX4 F4-class
-flight controllers.
+**Active profile: STM32F103C8, Cortex-M3 @ 8 MHz (internal HSI RC
+oscillator)** (`DS5319`). This replaced an earlier STM32F405/Cortex-M4 @
+168 MHz baseline (`cortex_m4_168mhz.py`, still available for comparison):
+the F405 is a real, widely-documented low-compute-drone chip, but its
+APE budgets (APE1/APE2 microseconds, APE3 ~19.6ms) were too fast to show
+meaningful interaction with this sim's deadline model — see "Is this
+realistic?" below. The F103 is also a real, extremely widely-manufactured
+industry chip (the Naze32/CC3D generation of flight controllers, the
+F1-class predecessor to the F405), here run at its low-power internal-
+oscillator operating point rather than its full 72MHz PLL speed — a
+genuine real-world firmware choice on battery-constrained boards, not a
+synthetic clock-down.
 
 | Constant | Value | Source |
 |---|---|---|
-| Active power | 0.287 W | 87 mA @ 3.3V, Run mode, 168 MHz, ART enabled, all peripherals enabled (DS8626 Rev 9, Table 20, Typ, TA=25°C) |
-| Idle fraction | 67.8% (~0.195 W) | 59 mA Sleep mode / 87 mA Run mode (DS8626 Rev 9, Table 22, Typ, TA=25°C) |
-| N_cores | 1 (single Cortex-M4 core) | — |
-| Clock | 168 MHz | matches the active gem5 profile's `CPU_CLOCK_HZ` |
+| Active power | 0.0165 W | 5.0 mA @ 3.3V, Run mode, 8 MHz HSI, code with data processing running from Flash (DS5319, Typ, TA=25°C — see `cortex_m3_8mhz.py`'s note: triangulated from secondary references, not read directly off the datasheet table) |
+| Idle fraction | ~12% (~0.002 W) | 0.61 mA Sleep mode / 5.0 mA Run mode (DS5319 Sleep-mode Typ current at 72MHz, frequency-scaled down to 8MHz — see `cortex_m3_8mhz.py`) |
+| N_cores | 1 (single Cortex-M3 core) | — |
+| Clock | 8 MHz | matches the active gem5 profile's `CPU_CLOCK_HZ` |
 
-The idle fraction is much higher here (67.8%) than the old H743 baseline
-(17.55%) — not a bug. On the F405, Sleep mode only clock-gates the CPU;
-with peripherals left enabled (matching how both datasheet tables were
-read, for consistency), most of the Run-mode current draw is still there
-in Sleep. This is a real property of the chip, not a modeling artifact.
+The idle fraction here (~12%) is much lower than the old F405 baseline
+(67.8%) — on the F103, Sleep-mode current is dominated by bus/peripheral
+clocking rather than a large fixed floor, so it drops off much more
+sharply than Run-mode current does as clock frequency falls. Both
+`ACTIVE_MA`/`SLEEP_MA` for this profile are approximate (see
+`cortex_m3_8mhz.py`'s docstring) since the primary DS5319 datasheet PDF
+could not be fetched directly in this environment — re-derive once it can
+be read.
 
 Cortex-M parts don't publish a "TDP" the way companion-computer SoCs do;
 `_ACTIVE_POWER_W` is the CPU-running figure, and `_IDLE_FRAC` uses Sleep
@@ -72,42 +80,44 @@ whichever chip the cycle counts were actually measured against — see §3.
 
 ### Is this realistic for avoiding a sudden incoming object?
 
-The raw gem5 numbers alone are not the realistic figure here. An idle
-Cortex-M4 running only the APE call would clear even APE3's raw budget
-(~120 µs) trivially against this sim's 147-650 ms threat deadlines —
-neither ISR entry (tens of ns) nor a full FreeRTOS scheduling tick
-(~1 ms) comes close to mattering at that timescale. Taken bare-metal, the
-deadline race would be moot: APE3 would win essentially every time.
+`budget_ms = APE_LATENCY_US[name] / 1000` — the live deadline budget is
+just the raw gem5-measured compute cost, bare-metal, with no
+scheduling/contention overhead term added on top. There used to be one
+(`CONTENTION_OVERHEAD_MS`, and before that a `DEADLINE_SCALE=1000`
+multiplier), modeling the APE call sharing the flight-controller core
+with other RTOS tasks (sensor fusion, telemetry, the motor-mixer control
+loop). It's been removed: this sim doesn't model those other tasks
+directly, so any such term was necessarily asserted rather than measured,
+and it added a layer of tuning on top of the one number this file is
+meant to be a source of truth for. `budget_ms` now tracks
+`APE_LATENCY_US` directly and needs no separate justification or
+recalibration when the native planners change.
 
-`DEADLINE_SCALE=1000` (`nav/mcu_cycle_model.py`) is therefore not a
-bare-metal hardware-overhead figure — it's a deliberate **CPU-contention
-stress multiplier**, modeling the APE call sharing the one flight-
-controller core with everything else this class of MCU runs without a
-separate companion computer (sensor fusion/filtering, telemetry, the
-motor-mixer control loop, other RTOS tasks) instead of running alone.
-That contention level is asserted, not measured — this sim doesn't model
-those other tasks directly — and is the actual free modeling parameter
-here, not the underlying gem5 cycle counts.
-
-At `DEADLINE_SCALE=1000`, `budget_ms` comes out to roughly **APE1 ≈
-6.6 ms, APE2 ≈ 40.9 ms, APE3 ≈ 119.5 ms**. Published UAV
-obstacle-avoidance literature gives a useful sanity check for whether
-that's a *plausible* contention level, not a proof of it: Falanga, Kim &
-Scaramuzza (*Dynamic obstacle avoidance for quadrotors with event
-cameras*, Science Robotics, 2020) report that "today's autonomous drones
-have reaction times of tens of milliseconds," and cite field measurements
-putting UAS at typical cruise speeds (10-15 m/s) under roughly a 500 ms
-total detect→classify→respond budget before a collision becomes
-unavoidable. APE1's ~6.6 ms budget sits comfortably inside that window;
-APE3's ~119.5 ms budget consumes a meaningful fraction of it, leaving
-less margin for sensing/classification latency ahead of it. That's the
-concrete justification for this sim's APE1/2/3 racing-selector design
-(cascade through faster, lower-quality planners as the deadline tightens,
-rather than always waiting for the highest-quality one) — under a
-plausible contended-CPU scenario, the slow planner alone can burn through
-a meaningful share of the literature-cited reaction-time budget. Under a
-bare-metal (uncontended) assumption instead, this justification
-evaporates — see `nav/mcu_cycle_model.py`'s `DEADLINE_SCALE` comment.
+At today's gem5-measured figures (`cortex_m3_8mhz.py`), that gives
+roughly **APE1 ≈ 0.14 ms, APE2 ≈ 2.5 ms, APE3 ≈ 412 ms** (regenerate via
+`make switch-processor` after any native planner change). Under the
+earlier `cortex_m4_168mhz.py` profile these budgets were APE1 ≈ 0.01 ms,
+APE2 ≈ 0.12 ms, APE3 ≈ 19.6 ms — real for that chip, but small enough
+next to this sim's deadline model (147-3500 ms, see `conf/events/`) that
+APE3 essentially never faced genuine time pressure; every event's
+deadline cleared its budget by 1-2 orders of magnitude regardless of how
+the event stream was tuned. Published UAV obstacle-avoidance literature
+gives a useful sanity check for whether the new, larger figure is a
+*plausible* absolute budget: Falanga, Kim & Scaramuzza (*Dynamic obstacle
+avoidance for quadrotors with event cameras*, Science Robotics, 2020)
+report that "today's autonomous drones have reaction times of tens of
+milliseconds," and cite field measurements putting UAS at typical cruise
+speeds (10-15 m/s) under roughly a 500 ms total detect→classify→respond
+budget before a collision becomes unavoidable. APE3's ~412 ms budget now
+sits close to that ceiling — a meaningful fraction of the physical
+response window rather than negligible against it — while APE1/APE2
+remain far cheaper (0.14 ms / 2.5 ms). That gap, driven entirely by
+APE3's own deeper search-based compute cost, is the concrete
+justification for this sim's APE1/2/3 racing-selector design (cascade
+through faster, lower-quality planners as the deadline tightens, rather
+than always waiting for the highest-quality one) — and now that gap
+actually matters: under `conf/events/default.yaml`'s baseline timing,
+APE3 solo can genuinely miss deadlines that APE1/APE2 would clear.
 
 ## 2. Propulsion power (`analysis/power_estimate.py`)
 
@@ -195,12 +205,20 @@ CANavigator's original methodology and is treated the same way here:
 flagged, not hidden.
 
 Available profiles:
-- `cortex_m4_168mhz.py` — **active default.** STM32F405, Cortex-M4 @
-  168 MHz, DS8626 Rev 9. The real chip in the Bitcraze Crazyflie 2.x
-  nano-drone and common Betaflight/PX4 F4-class flight controllers.
+- `cortex_m3_8mhz.py` — **active default.** STM32F103C8, Cortex-M3 @
+  8 MHz (internal HSI RC oscillator), DS5319. The MCU behind the
+  Naze32/CC3D generation of flight controllers, run at a real low-power
+  operating point rather than its full 72MHz PLL speed — chosen because
+  it pushes APE3's budget (~412ms) into a physically meaningful range
+  against this sim's deadline model, rather than negligible (see "Is
+  this realistic?" above).
+- `cortex_m4_168mhz.py` — historical/comparison profile. STM32F405,
+  Cortex-M4 @ 168 MHz, DS8626 Rev 9. The real chip in the Bitcraze
+  Crazyflie 2.x nano-drone and common Betaflight/PX4 F4-class flight
+  controllers. Retained for comparison; no longer the live default.
 - `cortex_m7_400mhz.py` — historical/comparison profile. STM32H743,
   Cortex-M7 @ 400 MHz, DS12110. Retained for comparison; no longer the
-  live default (see "Is this realistic?" above for why).
+  live default.
 
 `run_gem5_study.py` discovers profiles dynamically by globbing
 `configs/*.py` — adding a new chip/clock is "drop in a new profile
@@ -226,12 +244,12 @@ two commands is normally unnecessary):
 cd native/ape_ops/gem5_bench/bench
 GEM5_ROOT=/path/to/gem5 make arm
 cd ..
-GEM5_ROOT=/path/to/gem5 python3 scripts/freeze_measured_latencies.py --profile cortex_m4_168mhz
+GEM5_ROOT=/path/to/gem5 python3 scripts/freeze_measured_latencies.py --profile cortex_m3_8mhz
 ```
 
-`--profile` defaults to `cortex_m4_168mhz`; pass any other profile name
+`--profile` defaults to `cortex_m3_8mhz`; pass any other profile name
 from `configs/` to switch which chip drives the live model (e.g.
-`--profile cortex_m7_400mhz` to go back to the old baseline for
+`--profile cortex_m4_168mhz` to go back to the faster F405 baseline for
 comparison). This rewrites `nav/gem5_measured_latencies.py`
 — including `CHIP`/`ACTIVE_MA`/`SLEEP_MA`/`VDD`, so `nav/mcu_cycle_model.py`'s
 power constants (§1) always match whichever chip's cycles it's reading —
@@ -246,7 +264,7 @@ switch the active CPU/algorithm. Run outputs (`stats.txt` etc.) land in
 above (build gem5 itself if missing, build the bench binaries if missing,
 regenerate the latency table for a chosen profile) and prints a
 per-planner summary -- gem5-measured latency (µs), the live deadline
-budget (ms, `DEADLINE_SCALE`-scaled), and active-power energy per single
+budget (ms, same as the raw latency), and active-power energy per single
 invocation (µJ). No env var required for a first-time run — gem5 is
 cloned and built into `.gem5-build/gem5/` automatically (30-60+ minutes,
 one-time); set `GEM5_ROOT` to point at an existing checkout instead if you

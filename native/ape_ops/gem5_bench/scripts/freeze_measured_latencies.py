@@ -5,8 +5,8 @@ from a fresh gem5 cycle-accurate run of the real native APE planners
 (ape1_bug_plan/dwa_plan/vfh_plan — native/ape_ops/src/; which of
 dwa_plan/vfh_plan runs under the "ape2"/"ape3" label is whatever
 native_api.c's ape_native_plan_ape2/ape_native_plan_ape3 dispatch to)
-against a named CPU profile from ../configs/ (default: cortex_m4_168mhz.py,
-STM32F405/Cortex-M4 @ 168MHz, this repo's target MCU; see
+against a named CPU profile from ../configs/ (default: cortex_m3_8mhz.py,
+STM32F103C8/Cortex-M3 @ 8MHz, this repo's target MCU; see
 docs/POWER_MODEL.md). Feeds both live deadline-feasibility timing
 (budget_ms) and compute-energy accounting.
 
@@ -106,7 +106,7 @@ TOTAL_CYCLES: dict[str, int] = {{
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--profile", default="cortex_m4_168mhz", choices=available_profiles())
+    ap.add_argument("--profile", default="cortex_m3_8mhz", choices=available_profiles())
     args = ap.parse_args()
 
     sys.path.insert(0, str(_CONFIGS_DIR))

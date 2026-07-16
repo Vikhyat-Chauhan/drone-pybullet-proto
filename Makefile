@@ -51,6 +51,7 @@ smoke:
 
 clean:
 	rm -rf venv native/ape_ops/build outputs multirun
+	$(MAKE) -C native/ape_ops/gem5_bench/bench clean
 	find . -name __pycache__ -exec rm -rf {} +
 
 # The exact sequence CI runs -- reproduce a CI failure locally with `make ci`.

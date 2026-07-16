@@ -9,7 +9,7 @@ simulation_timeout: 200
 simulation_world_style: city  # perlin|city
 
 fixed_seed: false
-world_gen_seed_offset: 1234
+world_gen_seed_offset: 3412
 target_distance: 150
 
 log_path: logs/run_logs.json

@@ -55,11 +55,14 @@ class TeleopConfig:
     event_seed: int = 42
     event_deterministic: bool = True
 
-    # Inter-event gap is drawn log-uniformly from [event_dt_min_s, event_dt_max_s].
-    # event_dt_min_s must stay <= rate_hz's tick period so a fast burst of
+    # Inter-event gap is drawn log-uniformly from [event_dt_min_ms, event_dt_max_ms].
+    # event_dt_min_ms must stay <= rate_hz's tick period (in ms) so a fast burst of
     # events never silently skips a tick (see experiment/orchestrator.py's drive loop).
-    event_dt_min_s: float = 0.02
-    event_dt_max_s: float = 4.0
+    # Config-facing units are ms; converted to seconds at the EventCfg boundary
+    # (experiment/orchestrator.py) since the simulation engine itself (SimClock,
+    # sim/event_source.py, nav/algorithm.py) runs entirely in seconds.
+    event_dt_min_ms: float = 20.0
+    event_dt_max_ms: float = 4000.0
 
     event_mix_enemy: float = 0.33
     event_mix_obstacle: float = 0.33
@@ -67,11 +70,11 @@ class TeleopConfig:
 
     event_log_csv_path: str = "logs/events_log.csv"
 
-    # Deadline model: deadline = clamp(alpha * dt, [deadline_min_s, deadline_max_s]).
-    # deadline_min_s = sudden-obstacle reaction window = (1.2+0.7+0.3)/15.0 ~= 0.147s.
+    # Deadline model: deadline = clamp(alpha * dt, [deadline_min_ms, deadline_max_ms]).
+    # deadline_min_ms = sudden-obstacle reaction window = (1.2+0.7+0.3)/15.0 * 1000 ~= 147ms.
     deadline_alpha: float = 0.85
-    deadline_min_s: float = 0.147
-    deadline_max_s: float = 3.50
+    deadline_min_ms: float = 147.0
+    deadline_max_ms: float = 3500.0
 
     # =======================
     # Physics (feeds DronePhysics)

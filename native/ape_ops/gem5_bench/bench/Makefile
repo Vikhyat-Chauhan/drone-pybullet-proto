@@ -13,7 +13,7 @@
 # Usage:
 #   GEM5_ROOT=/path/to/gem5 make arm
 
-GEM5_ROOT       ?= $(error GEM5_ROOT must be set to a gem5 checkout)
+GEM5_ROOT       ?=
 APE_SRC_DIR     := ../../src
 APE_INC_DIR     := ../../include
 BUILD_DIR       := build
@@ -26,9 +26,12 @@ COMMON_CFLAGS   := -O2 -static -I$(APE_INC_DIR) -I$(GEM5_ROOT)/include
 
 ARM_M5OP        := $(GEM5_ROOT)/util/m5/src/abi/arm/m5op.S
 
-.PHONY: arm clean
+.PHONY: arm clean check-gem5-root
 
-arm: $(BUILD_DIR)/arm/bench_ape1 $(BUILD_DIR)/arm/bench_ape2 $(BUILD_DIR)/arm/bench_ape3
+arm: check-gem5-root $(BUILD_DIR)/arm/bench_ape1 $(BUILD_DIR)/arm/bench_ape2 $(BUILD_DIR)/arm/bench_ape3
+
+check-gem5-root:
+	@test -n "$(GEM5_ROOT)" || { echo "Makefile: GEM5_ROOT must be set to a gem5 checkout" >&2; exit 1; }
 
 $(BUILD_DIR)/arm/bench_ape%: $(COMMON_SRCS) $(ARM_M5OP) $(APE_INC_DIR)/*.h | $(BUILD_DIR)/arm
 	# -marm: this toolchain defaults to Thumb with interworking disabled,

@@ -30,7 +30,19 @@ class EnergyMonitor:
         self,
         sim_clock,
         *,
-        min_step_m: float = 0.01,
+        # Per-push_pose-call displacement debounce (filters numerical
+        # jitter) -- rate-dependent by construction, since it's compared
+        # against ONE tick's worth of movement (v * phys_dt), not a real
+        # distance/time threshold. Was 0.01m (1cm), tuned for
+        # experiment/orchestrator.py's old phys_dt=1/60s (~16.7ms), where a
+        # several-m/s cruise moves several cm per tick -- comfortably above
+        # that floor. At the current phys_dt=1/1000s (~1ms, see
+        # orchestrator.py), the same cruise speed moves under a centimeter
+        # per tick, so the old floor silently zeroed out nearly every
+        # step's energy contribution (energy_j read back as ~0). Scaled
+        # down by the same ~16.7x ratio phys_dt shrank by. Rescale if
+        # phys_dt changes again.
+        min_step_m: float = 0.001,
         v_tau_s: float = 0.25,
         vz_tau_s: float = 0.25,
         epm_preset: Optional[str] = "flykart30",

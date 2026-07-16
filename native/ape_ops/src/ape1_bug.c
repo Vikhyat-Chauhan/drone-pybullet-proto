@@ -23,10 +23,24 @@
 ape_result_t ape1_bug_plan(const ape_params_t *p) {
     ape_result_t r = {0};
 
+    /* bug_oversample_n repeats each sector-min lookup N times and
+     * averages. The scan snapshot is frozen for the whole tick, so
+     * repeated lookups are numerically identical -- this scales native
+     * compute cost (and hence gem5-measured latency) without changing
+     * the planner's output, matching the fidelity/cost tradeoff already
+     * modeled for APE2/APE3 via their own grid-resolution params. */
+    int32_t n_over = (p->bug_oversample_n > 1) ? p->bug_oversample_n : 1;
     float front_half = (p->front_deg > 5.0f) ? p->front_deg : 5.0f;
-    float d_front = ape_sector_min(p, 0, 0.0f, front_half);
-    float d_left  = ape_sector_min(p, 0, +SIDE_WINDOW_CENTER_DEG, SIDE_WINDOW_HALF_DEG);
-    float d_right = ape_sector_min(p, 0, -SIDE_WINDOW_CENTER_DEG, SIDE_WINDOW_HALF_DEG);
+
+    float d_front = 0.0f, d_left = 0.0f, d_right = 0.0f;
+    for (int32_t i = 0; i < n_over; i++) {
+        d_front += ape_sector_min(p, 0, 0.0f, front_half);
+        d_left  += ape_sector_min(p, 0, +SIDE_WINDOW_CENTER_DEG, SIDE_WINDOW_HALF_DEG);
+        d_right += ape_sector_min(p, 0, -SIDE_WINDOW_CENTER_DEG, SIDE_WINDOW_HALF_DEG);
+    }
+    d_front /= (float)n_over;
+    d_left  /= (float)n_over;
+    d_right /= (float)n_over;
 
     float inv_left  = 1.0f / ((d_left  > EPS_M) ? d_left  : EPS_M);
     float inv_right = 1.0f / ((d_right > EPS_M) ? d_right : EPS_M);

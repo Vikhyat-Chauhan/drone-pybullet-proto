@@ -20,6 +20,14 @@ defaults:
 # line for the interactive PyBullet demo window.
 gui: false
 
+# Not a TeleopConfig field -- read directly by run.py and passed to
+# experiment.orchestrator.main(workers=...). 1 = today's single-process
+# behavior. >1 fans simulation_runs out across that many worker processes
+# (experiment/parallel.py) -- each attempt is independent, so this scales
+# close to linearly with CPU cores. Incompatible with gui=true (interactive
+# mode is inherently single-process).
+workers: 1
+
 hydra:
   job:
     # Each run (or each multirun job) gets its own working directory, so

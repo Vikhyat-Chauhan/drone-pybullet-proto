@@ -27,7 +27,7 @@ import logging
 from sim.teleop import PyTeleop
 from config import TeleopConfig
 from nav.mcu_cycle_model import (
-    McuCycleMeter, latency_to_energy_j, APE_LATENCY_US, DEADLINE_SCALE,
+    McuCycleMeter, latency_to_energy_j, APE_LATENCY_US,
 )
 import nav.ape_native as ape_native
 from sim.sim_adapters import (
@@ -51,7 +51,19 @@ class GoToConfig:
     max_vz: float = 3.5
     max_wz: float = 1.4
     slow_yaw_threshold: float = 1.0
-    rate_hz: float = 30.0
+    # Matches experiment/orchestrator.py's phys_dt (1/1000s) 1:1 -- nav.tick()
+    # can only ever fire once per physics step regardless of rate_hz (the
+    # drive loop calls it at most once per outer-loop iteration), so setting
+    # rate_hz any higher than 1/phys_dt buys nothing; setting it lower wastes
+    # the granularity phys_dt already provides. This was raised from 30Hz
+    # (~33.3ms) specifically so per-tick preemption/readiness checks can
+    # resolve at ~1ms granularity -- fine enough to separate APE1 (~0.14ms
+    # budget) from APE2 (~2.49ms) via real event timing instead of the
+    # same-tick-batching artifact that was the only lever at 30Hz (see
+    # conf/events/ape2_pressure.yaml). Was 30Hz historically, matching
+    # CANavigator's original ROS control-loop rate on real flight-controller
+    # hardware; that constraint doesn't apply to this sim's compute budget.
+    rate_hz: float = 1000.0
     edge_guard_m: float = 4.5
     edge_guard_scale: float = 0.6
 
@@ -87,7 +99,16 @@ class SafetyCfg:
     min_progress_m: float = 1.0
     escape_yaw_rad: float = 0.8
     escape_time_s: float = 0.8
-    crumb_oscillations_to_flip: int = 12
+    # A raw per-tick count, not a time threshold -- rate-dependent by
+    # construction (unlike progress_window_s/escape_time_s above, which are
+    # real seconds). Originally 12 at GoToConfig.rate_hz=30Hz, i.e. ~0.4s of
+    # consecutive same-cell revisits before flipping side_bias. Scaled to
+    # 400 to preserve that same ~0.4s real-time dwell threshold now that
+    # rate_hz=1000Hz (12 * 1000/30) -- left unscaled, this would trigger the
+    # flip ~33x more often in real time (reaching 12 same-cell ticks in
+    # ~12ms instead of ~0.4s), causing much more frequent oscillation.
+    # Rescale by the same ratio if GoToConfig.rate_hz changes again.
+    crumb_oscillations_to_flip: int = 400
     dv_max_mps_per_s: float = 6.0
     jw_max_radps2: float = 3.0
     clear_ahead_thresh_m: float = 16.0
@@ -112,9 +133,9 @@ class RiskCfg:
 # APE planning budgets (ms), computed live from mcu_cycle_model.py's
 # gem5-measured APE_LATENCY_US (the single modeled Cortex-M7-approximation
 # MCU) so they can never drift from the model they're derived from.
-_APE1_BUDGET_MS = APE_LATENCY_US["APE1"] * DEADLINE_SCALE / 1000.0
-_APE2_BUDGET_MS = APE_LATENCY_US["APE2"] * DEADLINE_SCALE / 1000.0
-_APE3_BUDGET_MS = APE_LATENCY_US["APE3"] * DEADLINE_SCALE / 1000.0
+_APE1_BUDGET_MS = APE_LATENCY_US["APE1"] / 1000.0
+_APE2_BUDGET_MS = APE_LATENCY_US["APE2"] / 1000.0
+_APE3_BUDGET_MS = APE_LATENCY_US["APE3"] / 1000.0
 
 
 @dataclass
@@ -136,15 +157,22 @@ class EventDecisionCfg:
 
 @dataclass
 class ApeAlgoCfg:
-    """Tuning for the native DWA (APE2) and VFH (APE3) planners, plus
-    multi-layer LiDAR geometry (mirrors the original model.sdf's <vertical>
-    block, as plain numbers since there's no SDF here)."""
+    """Tuning for the native Bug (APE1), DWA (APE2), and VFH (APE3)
+    planners, plus multi-layer LiDAR geometry (mirrors the original
+    model.sdf's <vertical> block, as plain numbers since there's no SDF
+    here)."""
     n_layers: int = 5
     vertical_angle_min: float = -0.0872665   # -5 deg
     vertical_angle_increment: float = 0.0436332  # (2*5deg)/(n_layers-1)
 
-    dwa_n_v: int = 3
-    dwa_n_w: int = 3
+    # Repeats each of APE1's 3 sector-min lookups N times and averages --
+    # a no-op on output (the scan is frozen for the tick) that scales
+    # native compute cost, giving APE1 a tunable analogous to APE2's
+    # dwa_n_v/dwa_n_w grid and APE3's vfh_n_sectors.
+    bug_oversample_n: int = 1
+
+    dwa_n_v: int = 2
+    dwa_n_w: int = 2
     dwa_dt: float = 0.3
     dwa_horizon_s: float = 0.6
     dwa_w_clear: float = 0.4
@@ -253,6 +281,7 @@ class LidarTargetNavigatorCA:
 
         self._evt_active: bool = False
         self._evt_resolved: bool = False
+        self._evt_arrival_t: float = 0.0
 
         self._resolved_cmd: tuple = (0.0, 0.0, 0.0)
         self._evt_resolved_at: float = 0.0
@@ -461,6 +490,8 @@ class LidarTargetNavigatorCA:
         p.sudden_obj_clearance_m = self._edc.sudden_obj_clearance_m
         p.curvature_k = self._rc.curvature_k
 
+        p.bug_oversample_n = self._algo.bug_oversample_n
+
         p.dwa_n_v = self._algo.dwa_n_v
         p.dwa_n_w = self._algo.dwa_n_w
         p.dwa_dt = self._algo.dwa_dt
@@ -472,6 +503,40 @@ class LidarTargetNavigatorCA:
         p.vfh_n_sectors = self._algo.vfh_n_sectors
         p.vfh_threshold = self._algo.vfh_threshold
         p.vfh_smax_sectors = self._algo.vfh_smax_sectors
+
+        # No-fly zones, transformed from world (cx, cy, w, h) into the same
+        # ego/body frame (x-forward, y-left) that ape3_vfh.c's tree search
+        # already simulates trajectories in -- rotation by -yaw matches the
+        # convention yaw_err = atan2(ey, ex) - yaw already relies on above.
+        # AABB of the rotated corners (not a rotated rect) is a conservative
+        # over-approximation, fine for a keep-out mask.
+        drone_x = snap.get("x", 0.0)
+        drone_y = snap.get("y", 0.0)
+        drone_yaw = snap.get("yaw", 0.0)
+        rects = self._nofly_rects()
+        if rects:
+            cos_yaw = math.cos(drone_yaw)
+            sin_yaw = math.sin(drone_yaw)
+            flat_rects = []
+            for (cx, cy, w, h) in rects:
+                hx, hy = 0.5 * w, 0.5 * h
+                ex_min = ey_min = float("inf")
+                ex_max = ey_max = float("-inf")
+                for wx, wy in ((cx - hx, cy - hy), (cx + hx, cy - hy),
+                               (cx - hx, cy + hy), (cx + hx, cy + hy)):
+                    dx, dy = wx - drone_x, wy - drone_y
+                    bx = dx * cos_yaw + dy * sin_yaw
+                    by = -dx * sin_yaw + dy * cos_yaw
+                    ex_min = min(ex_min, bx); ex_max = max(ex_max, bx)
+                    ey_min = min(ey_min, by); ey_max = max(ey_max, by)
+                flat_rects.extend([ex_min, ey_min, ex_max, ey_max])
+            arr2 = (ctypes.c_float * len(flat_rects))(*flat_rects)
+            p._nofly_rects_keepalive = arr2
+            p.nofly_rects_ego = ctypes.cast(arr2, ctypes.POINTER(ctypes.c_float))
+            p.n_nofly_rects = len(rects)
+        else:
+            p.nofly_rects_ego = ctypes.cast(0, ctypes.POINTER(ctypes.c_float))
+            p.n_nofly_rects = 0
 
         return p
 
@@ -732,6 +797,7 @@ class LidarTargetNavigatorCA:
                     "scan": scan,
                     "yaw_err": _wrap_pi(math.atan2(ey, ex) - yaw),
                     "cloud": self._cloud_provider.latest(),
+                    "x": x, "y": y, "yaw": yaw,
                 }
                 self._evt_v_cmd_pre = v_cmd
 
@@ -739,6 +805,7 @@ class LidarTargetNavigatorCA:
                 # scheduled in sim-time (ready_t) -- see _evt_plan_ape1.
                 mode = self._edc.selector_mode
                 arrival_sim_t = self._sim_time()
+                self._evt_arrival_t = arrival_sim_t
                 if mode in ("CA", "APE1"):
                     self._evt_plan_ape1(snap, self._edc.ape1_budget_ms, arrival_sim_t)
                 if mode in ("CA", "APE2"):
@@ -814,7 +881,8 @@ class LidarTargetNavigatorCA:
                         _running = (["APE1", "APE2", "APE3"]
                                     if self._edc.selector_mode == "CA"
                                     else [winner_name])
-                        self._cycle_meter.record_event(winner_name, _running)
+                        halt_us = (now_t - self._evt_arrival_t) * 1e6
+                        self._cycle_meter.record_event(winner_name, _running, halt_us)
                         self._evt_resolved = True
                         self._resolved_cmd = (prop["v"], prop["wz"], prop["vz"])
                         self._evt_resolved_at = self._sim_time()

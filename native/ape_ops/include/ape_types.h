@@ -53,6 +53,12 @@ typedef struct {
     float sudden_obj_radius_m, sudden_obj_clearance_m;
     float curvature_k;
 
+    /* Bug-style reactive planner (ape1_bug.c) */
+    int32_t bug_oversample_n;  /* repeats each sector-min lookup N times
+                                   (averaged; scan is frozen for the tick,
+                                   so this scales compute cost only, not
+                                   the result) */
+
     /* Dynamic Window Approach (dwa.c) */
     int32_t dwa_n_v, dwa_n_w;   /* candidate grid resolution */
     float dwa_dt, dwa_horizon_s;
@@ -62,6 +68,14 @@ typedef struct {
     int32_t vfh_n_sectors;      /* polar histogram resolution */
     float vfh_threshold;        /* obstacle-density threshold for "blocked" */
     float vfh_smax_sectors;     /* max valley width considered "wide" */
+
+    /* No-fly zones, in the same ego/body frame (x-forward, y-left) as the
+     * planners' own kinematic simulation -- flat, 4 floats/rect:
+     * (xmin, ymin, xmax, ymax), AABB of the zone already rotated+translated
+     * into ego frame by the caller. Only vfh.c (RHTP) consumes these today;
+     * bug.c/dwa.c ignore them. */
+    const float *nofly_rects_ego;
+    int32_t n_nofly_rects;
 } ape_params_t;
 
 typedef struct {

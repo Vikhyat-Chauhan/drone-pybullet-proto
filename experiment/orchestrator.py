@@ -82,11 +82,13 @@ def run_strategy(strategy: str, cfg: TeleopConfig, drone_body: int, start_xy, ta
     events = EventQueue()
     emitter = EventEmitter(events, sim_clock, EventCfg(
         seed=cfg.event_seed, event_deterministic=cfg.event_deterministic,
-        dt_min_s=cfg.event_dt_min_s,
-        dt_max_s=cfg.event_dt_max_s,
+        # cfg's event_dt_*_ms/deadline_*_ms are config-facing milliseconds;
+        # EventCfg/the sim engine run in seconds (SimClock), so convert here.
+        dt_min_s=cfg.event_dt_min_ms / 1000.0,
+        dt_max_s=cfg.event_dt_max_ms / 1000.0,
         deadline_alpha=cfg.deadline_alpha,
-        deadline_min_s=cfg.deadline_min_s,
-        deadline_max_s=cfg.deadline_max_s,
+        deadline_min_s=cfg.deadline_min_ms / 1000.0,
+        deadline_max_s=cfg.deadline_max_ms / 1000.0,
         mix_enemy=cfg.event_mix_enemy,
         mix_obstacle=cfg.event_mix_obstacle,
         mix_lane=cfg.event_mix_lane,
@@ -121,6 +123,12 @@ def run_strategy(strategy: str, cfg: TeleopConfig, drone_body: int, start_xy, ta
     last_evt_seq = 0
     evt_hide_at = [float("inf")]
 
+    # Step-count cadences below (trail sampling, status prints) are derived
+    # from phys_dt rather than hardcoded step counts, so they stay at their
+    # intended real-time rate regardless of the physics step rate.
+    trail_interval = max(1, round(0.5 / phys_dt))   # ~2Hz
+    print_interval = max(1, round(2.0 / phys_dt))   # ~every 2 sim-seconds
+
     step = 0
     while True:
         scan_provider.update()
@@ -133,7 +141,7 @@ def run_strategy(strategy: str, cfg: TeleopConfig, drone_body: int, start_xy, ta
 
         if gui and event_markers is not None:
             # Must run every iteration, not throttled: events can arrive as
-            # fast as phys_dt (0.0167s) < event_dt_min_s (0.02s default), so
+            # fast as phys_dt (1ms) -- often < event_dt_min_ms -- so
             # throttling could silently skip a marker.
             drone_yaw = p.getEulerFromQuaternion(orn)[2]
             last_evt_seq = update_event_marker(event_markers, emitter, last_evt_seq,
@@ -166,13 +174,13 @@ def run_strategy(strategy: str, cfg: TeleopConfig, drone_body: int, start_xy, ta
             cam_yaw_deg += 0.15 * d
             p.resetDebugVisualizerCamera(cameraDistance=22, cameraYaw=cam_yaw_deg, cameraPitch=-50,
                                           cameraTargetPosition=[pos[0], pos[1], 0])
-            if step % 30 == 0:  # ~2Hz trail sampling -- sparse so segments don't pile up
+            if step % trail_interval == 0:  # ~2Hz trail sampling -- sparse so segments don't pile up
                 _trail_ids.append(p.addUserDebugLine(trail_last_pos, pos, lineColorRGB=[0.1, 0.9, 0.9],
                                                        lineWidth=2.0, lifeTime=0))
                 trail_last_pos = pos
             time.sleep(phys_dt)
 
-        if step % 120 == 0:  # ~every 2 sim-seconds, both GUI and headless
+        if step % print_interval == 0:  # ~every 2 sim-seconds, both GUI and headless
             dist = math.hypot(pos[0] - target_xy[0], pos[1] - target_xy[1])
             print(f"       t={sim_clock.now():6.1f}s pos=({pos[0]:7.2f},{pos[1]:7.2f}) "
                   f"dist_to_target={dist:6.2f} status={status}")
@@ -195,7 +203,13 @@ def run_attempt(cfg: TeleopConfig, attempt_idx: int, gui: bool, strategies,
                  overlay: Optional[MetricsOverlay] = None):
     p.resetSimulation()
     p.setGravity(0, 0, 0)
-    phys_dt = 1.0 / 60.0
+    # 1000Hz (was 1/60s) -- matches GoToConfig.rate_hz 1:1 so nav.tick() can
+    # fire every physics step, giving ~1ms preemption/readiness-check
+    # granularity (needed to separate APE1/APE2's budgets -- see
+    # nav/algorithm.py's GoToConfig.rate_hz comment). ~16.7x more
+    # stepSimulation() calls per mission than the old 60Hz -- slower
+    # wall-clock runs, a deliberate tradeoff for finer sim-time resolution.
+    phys_dt = 1.0 / 1000.0
     p.setTimeStep(phys_dt)
     sim_clock = SimClock(phys_dt)
 
@@ -287,14 +301,19 @@ def run_attempt(cfg: TeleopConfig, attempt_idx: int, gui: bool, strategies,
     return all_reached, buffered
 
 
-def main(gui: bool = True, strategies=None, simulation_runs: int = None,
-         cfg: Optional[TeleopConfig] = None) -> None:
-    if cfg is None:
-        cfg = TeleopConfig()
-    if simulation_runs is not None:
-        cfg.simulation_runs = simulation_runs
-    strategies = strategies or cfg.analyzer_strategies
+def run_batch(cfg: TeleopConfig, gui: bool, strategies, quota: int,
+              attempt_start: int = 1, attempt_step: int = 1, label: str = "") -> tuple:
+    """Runs attempts (attempt_idx = attempt_start, attempt_start+attempt_step, ...)
+    until `quota` good runs land in cfg.results_csv_path, or forever if quota
+    is never reached. One process, one PyBullet client -- the parallel fan-out
+    in experiment/parallel.py runs one of these per worker process, each
+    given its own cfg (own results_csv_path/log_path/nofly_meta_path/
+    target_json_path/event_log_csv_path -- see experiment/parallel.py for why
+    those must not be shared across processes) and an interleaved attempt_idx
+    stream so seeds don't collide between workers.
 
+    Returns (good_runs, attempts_tried).
+    """
     logcfg = AsyncLoggerCfg(
         logfile=cfg.log_path, max_bytes=0, queue_maxsize=8000,
         drop_on_full=False, console=False, level=logging.INFO, json_format=True,
@@ -323,13 +342,14 @@ def main(gui: bool = True, strategies=None, simulation_runs: int = None,
     overlay = MetricsOverlay() if gui else None
 
     good_runs = 0
-    attempt_idx = 0
-    t_wall_start = time.time()
+    attempt_n = 0
+    attempt_idx = attempt_start - attempt_step
     try:
-        while good_runs < cfg.simulation_runs:
-            attempt_idx += 1
+        while good_runs < quota:
+            attempt_n += 1
+            attempt_idx += attempt_step
             run_idx = good_runs + 1
-            print(f"\n=== Attempt {attempt_idx} (run {run_idx}/{cfg.simulation_runs}, "
+            print(f"\n=== {label}Attempt {attempt_idx} (run {run_idx}/{quota}, "
                   f"{cfg.simulation_world_style} arena) ===")
 
             all_reached, buffered = run_attempt(cfg, attempt_idx, gui, strategies, overlay=overlay)
@@ -337,15 +357,36 @@ def main(gui: bool = True, strategies=None, simulation_runs: int = None,
             if all_reached:
                 good_runs += 1
                 flush_csv(cfg.results_csv_path, run_idx, buffered)
-                print(f"Run {run_idx}: all strategies reached ({good_runs}/{cfg.simulation_runs} good runs)")
+                print(f"{label}Run {run_idx}: all strategies reached ({good_runs}/{quota} good runs)")
             else:
-                print(f"Attempt {attempt_idx} discarded: a strategy failed to reach target")
+                print(f"{label}Attempt {attempt_idx} discarded: a strategy failed to reach target")
     finally:
         p.disconnect()
         log_handle.stop()
         if overlay is not None:
             overlay.close()
 
+    return good_runs, attempt_n
+
+
+def main(gui: bool = True, strategies=None, simulation_runs: int = None,
+         cfg: Optional[TeleopConfig] = None, workers: int = 1) -> None:
+    if cfg is None:
+        cfg = TeleopConfig()
+    if simulation_runs is not None:
+        cfg.simulation_runs = simulation_runs
+    strategies = strategies or cfg.analyzer_strategies
+
+    t_wall_start = time.time()
+
+    if workers > 1:
+        if gui:
+            raise ValueError("gui=True needs a single interactive process -- pass workers=1 with gui=true")
+        from experiment.parallel import run_parallel
+        good_runs, attempts = run_parallel(cfg, strategies, workers)
+    else:
+        good_runs, attempts = run_batch(cfg, gui, strategies, cfg.simulation_runs)
+
     print(f"\nTotal wall time: {time.time() - t_wall_start:.1f}s for {good_runs} good runs "
-          f"({attempt_idx} attempts)")
+          f"({attempts} attempts)")
     run_analysis(zone_metric="mean", cfg=cfg)

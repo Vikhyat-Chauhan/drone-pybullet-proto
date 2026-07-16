@@ -10,4 +10,3 @@ defaults:
 # run-group field stays present/overridable under this preset too.
 simulation_runs: 1000
 fixed_seed: false
-world_gen_seed_offset: 1234

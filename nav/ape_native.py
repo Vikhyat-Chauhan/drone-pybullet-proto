@@ -64,6 +64,8 @@ class ApeParams(ctypes.Structure):
         ("sudden_obj_clearance_m", ctypes.c_float),
         ("curvature_k", ctypes.c_float),
 
+        ("bug_oversample_n", ctypes.c_int32),
+
         ("dwa_n_v", ctypes.c_int32),
         ("dwa_n_w", ctypes.c_int32),
         ("dwa_dt", ctypes.c_float),
@@ -75,6 +77,9 @@ class ApeParams(ctypes.Structure):
         ("vfh_n_sectors", ctypes.c_int32),
         ("vfh_threshold", ctypes.c_float),
         ("vfh_smax_sectors", ctypes.c_float),
+
+        ("nofly_rects_ego", ctypes.POINTER(ctypes.c_float)),
+        ("n_nofly_rects", ctypes.c_int32),
     ]
 
 

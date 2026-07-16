@@ -105,7 +105,7 @@ def _print_summary() -> None:
     print("-" * len(header))
     for name in ("APE1", "APE2", "APE3"):
         latency_us = mcu.APE_LATENCY_US[name]
-        budget_ms = latency_us * mcu.DEADLINE_SCALE / 1000.0
+        budget_ms = latency_us / 1000.0
         energy_uj = active_power_w * latency_us  # W * us == uJ, single call (u_eff=1.0)
         print(f"{name:<8} {latency_us:12.2f} {budget_ms:11.2f} {energy_uj:20.3f}")
     print()

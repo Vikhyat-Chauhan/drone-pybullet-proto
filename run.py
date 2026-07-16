@@ -11,6 +11,7 @@ dataclass, never a Hydra-wrapped one.
 Usage:
     python run.py                                   # defaults (headless batch mode)
     python run.py gui=true                           # interactive PyBullet demo window
+    python run.py workers=8                           # fan attempts out across 8 processes
     python run.py events=dense physics=gusty          # swap config-group presets
     python run.py rate_hz=200 wind_level_0to1=0.8      # ad-hoc field overrides
     python run.py -m world_gen_seed_offset=7778,7779,7780,7781,7782
@@ -41,9 +42,11 @@ _TELEOP_FIELDS = {f.name for f in dataclasses.fields(TeleopConfig)}
 def run(cfg_hydra: DictConfig) -> None:
     plain = OmegaConf.to_container(cfg_hydra, resolve=True)
 
-    # `gui` is an experiment.orchestrator.main() argument, not a TeleopConfig
-    # field -- pulled out separately rather than filtered into tc_kwargs below.
+    # `gui`/`workers` are experiment.orchestrator.main() arguments, not
+    # TeleopConfig fields -- pulled out separately rather than filtered into
+    # tc_kwargs below.
     gui = bool(plain.get("gui", False))
+    workers = int(plain.get("workers", 1))
 
     # Only pass through keys that are actual TeleopConfig fields -- anything
     # else in the composed config (gui, Hydra's own bookkeeping) is ignored
@@ -53,7 +56,7 @@ def run(cfg_hydra: DictConfig) -> None:
     cfg = TeleopConfig(**tc_kwargs)
 
     log.info("Resolved TeleopConfig: %s", cfg)
-    run_experiment(gui=gui, cfg=cfg)
+    run_experiment(gui=gui, cfg=cfg, workers=workers)
 
 
 if __name__ == "__main__":

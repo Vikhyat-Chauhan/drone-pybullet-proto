@@ -49,14 +49,6 @@ APE_LATENCY_US: dict[str, float] = {
 # Which chip the active gem5 profile (gem5_measured_latencies.py) targets.
 CHIP: str = _CHIP
 
-# DEADLINE_SCALE: the only software/scheduling-overhead multiplier applied
-# (Python + OS thread-scheduling contention on the flight controller).
-# budget_ms = APE_LATENCY_US[name] * DEADLINE_SCALE / 1000. Whether 1000x
-# is still the right multiplier on real gem5-measured cycle counts is an
-# unverified modeling choice, not something this file resolves — see
-# docs/POWER_MODEL.md.
-DEADLINE_SCALE: float = 1000.0
-
 # ---------------------------------------------------------------------------
 # Power model parameters, from the active gem5 profile's chip
 # (CHIP/ACTIVE_MA/SLEEP_MA/VDD, frozen alongside its cycle counts — see
@@ -109,16 +101,20 @@ class McuCycleMeter:
     """
     Computes total compute latency (µs) for APE workloads on the single
     modeled MCU, using the parallel-halt execution model: all APEs in a
-    selector run start simultaneously; when the selected one finishes at
-    T_sel, any still-running APE is halted, contributing
-    min(its_latency, T_sel). Solo modes cost that APE's full latency.
+    selector run start simultaneously; when the event is resolved at the
+    real elapsed halt instant T_halt (a planner's own ready time, or a
+    later deadline-driven fallback instant if resolution had to wait on
+    a higher-priority planner that never became ready in time), any
+    still-running APE is halted, contributing min(its_latency, T_halt).
+    Solo modes cost that APE's full latency (T_halt == its own latency,
+    since there is nothing else to wait on).
 
     Uses the same APE_LATENCY_US table algorithm.py's budget_ms derives
     from, and latency_to_energy_j's single-MCU-core power model.
 
     API:
         begin()
-        record_event(selected: str, running: list)
+        record_event(selected: str, running: list, halt_us: float)
         end() -> (total_latency_us: float, per_selected_us: dict[str, float])
     """
 
@@ -130,16 +126,19 @@ class McuCycleMeter:
         self._total_us = 0.0
         self._per_selected = {"APE1": 0.0, "APE2": 0.0, "APE3": 0.0}
 
-    def record_event(self, selected: str, running: list) -> None:
+    def record_event(self, selected: str, running: list, halt_us: float) -> None:
         """
         Record one event's compute cost under the parallel-halt model.
 
         selected : APE whose plan was applied ("APE1", "APE2", or "APE3")
         running  : all APEs spawned for this event — ["APE1","APE2","APE3"]
                    for CA, [selected] for solo modes
+        halt_us  : real elapsed time (arrival to resolution) at which any
+                   still-running APE was halted — the caller's actual
+                   simulated timeline, not a value re-derived from the
+                   static latency table.
         """
-        t_sel = APE_LATENCY_US.get(selected, 0.0)
-        cost  = sum(min(APE_LATENCY_US.get(n, 0.0), t_sel) for n in running)
+        cost = sum(min(APE_LATENCY_US.get(n, 0.0), halt_us) for n in running)
         self._total_us += cost
         if selected in self._per_selected:
             self._per_selected[selected] += cost

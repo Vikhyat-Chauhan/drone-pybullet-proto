@@ -5,9 +5,17 @@ defaults:
   - _self_
 
 # Fewer, more spaced-out threat events -- widens the log-uniform
-# inter-arrival window (event_dt_min_s/event_dt_max_s in event_source.py).
+# inter-arrival window (event_dt_min_ms/event_dt_max_ms in event_source.py,
+# there in seconds as dt_min_s/dt_max_s -- see conf/events/default.yaml's
+# comment for the ms/s boundary).
 # Extends events/default.yaml (see conf/run/smoke.yaml's comment for why the
 # `defaults` list here matters) so every events-group field stays
 # present/overridable.
-event_dt_min_s: 1.0
-event_dt_max_s: 8.0
+# Widest margin in the events group: event_dt_min_ms sits ~7250x above
+# APE1's budget (~0.14ms) and event_dt_max_ms ~19x above APE3's budget
+# (~412.4ms, cortex_m3_8mhz.py -- see docs/POWER_MODEL.md; both ratios
+# shrank from the older, faster cortex_m4_168mhz.py profile but are still
+# comfortable) -- consistent with "sparse" being the low-time-pressure end
+# of the group.
+event_dt_min_ms: 1000.0
+event_dt_max_ms: 8000.0

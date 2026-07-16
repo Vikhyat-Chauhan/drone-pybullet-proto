@@ -98,6 +98,10 @@ static void build_fixture(ape_params_t *p) {
     p->stop_margin_m = 2.0f;
     p->curvature_k = 0.9f;
 
+    /* AlgoTuning: Bug (mirrors nav/algorithm.py's ApeAlgoCfg live
+     * default). */
+    p->bug_oversample_n = 1;
+
     /* AvoidCfg */
     p->safe_m = 5.0f;
     p->front_deg = 5.0f;
@@ -113,8 +117,8 @@ static void build_fixture(ape_params_t *p) {
     /* AlgoTuning: DWA (mirrors nav/algorithm.py's ApeAlgoCfg live
      * defaults -- sized to keep this tier's real measured cost "medium",
      * see that dataclass's docstring for why). */
-    p->dwa_n_v = 3;
-    p->dwa_n_w = 3;
+    p->dwa_n_v = 2;
+    p->dwa_n_w = 2;
     p->dwa_dt = 0.3f;
     p->dwa_horizon_s = 0.6f;
     p->dwa_w_clear = 0.4f;
@@ -125,6 +129,14 @@ static void build_fixture(ape_params_t *p) {
     p->vfh_n_sectors = 36;
     p->vfh_threshold = 0.3f;
     p->vfh_smax_sectors = 6.0f;
+
+    /* One representative no-fly zone (city-building scale, see
+     * models/generated/generated_nofly_meta.json), ahead and to the
+     * right in ego frame -- gives vfh.c's rasterization step real
+     * (non-degenerate) work, matching a plausible in-flight geometry. */
+    static const float NOFLY_FIXTURE[4] = { 8.0f, -10.0f, 14.0f, -4.0f };
+    p->nofly_rects_ego = NOFLY_FIXTURE;
+    p->n_nofly_rects = 1;
 }
 
 int main(void) {

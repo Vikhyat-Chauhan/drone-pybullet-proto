@@ -50,11 +50,11 @@ exactly.
 |---|---|---|
 | `event_seed` | `42` | RNG seed for event timing/kind/deadline draws. |
 | `event_deterministic` | `true` | Pose-independent logical-clock event timing (the only mode `experiment/orchestrator.py` uses). |
-| `event_dt_min_s` / `event_dt_max_s` | `0.02` / `4.0` | Log-uniform inter-event-arrival window (s). |
+| `event_dt_min_ms` / `event_dt_max_ms` | `20.0` / `4000.0` | Log-uniform inter-event-arrival window (ms). Config-facing unit; converted to seconds at the `EventCfg` boundary in `experiment/orchestrator.py` since the sim engine (`SimClock`, `sim/event_source.py`, `nav/algorithm.py`) runs in seconds throughout. |
 | `event_mix_enemy/obstacle/lane` | `0.33 / 0.33 / 0.34` | Event-kind mixture weights. |
 | `event_log_csv_path` | `logs/events_log.csv` | Raw per-event CSV log. |
-| `deadline_alpha` | `0.85` | `deadline = clamp(alpha * dt, [deadline_min_s, deadline_max_s])`. |
-| `deadline_min_s` / `deadline_max_s` | `0.147` / `3.50` | Deadline clamp bounds. |
+| `deadline_alpha` | `0.85` | `deadline = clamp(alpha * dt, [deadline_min_ms, deadline_max_ms])` (dt in ms). |
+| `deadline_min_ms` / `deadline_max_ms` | `147.0` / `3500.0` | Deadline clamp bounds (ms). |
 
 ### `physics` (`conf/physics/`) -- feeds `DronePhysics`
 

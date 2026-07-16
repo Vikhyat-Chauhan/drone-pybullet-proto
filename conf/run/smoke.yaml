@@ -20,8 +20,7 @@ defaults:
 # with this file from the composed schema entirely (Hydra config groups are
 # a replacement, not a merge, unless a file explicitly extends its sibling
 # like this).
-simulation_runs: 1
+simulation_runs: 10
 target_distance: 150
 simulation_timeout: 200
-fixed_seed: true
-world_gen_seed_offset: 1234
+fixed_seed: false

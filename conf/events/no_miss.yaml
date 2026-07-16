@@ -7,22 +7,44 @@ defaults:
   - default
   - _self_
 
-# APE3's emulated deadline budget is ~142.12ms (nav/mcu_cycle_model.py:
-# APE_LATENCY_US["APE3"] * DEADLINE_SCALE / 1000, see nav/gem5_measured_
-# latencies.py). Two things can make it "miss" under events/default.yaml:
-#   1. deadline_min_s floor (0.147s) sits right on top of that budget, so
-#      the clamp's lower bound alone can hand out deadlines APE3 can't
-#      make even with the whole race to itself.
-#   2. event_dt_min_s (0.02s) allows inter-arrival gaps far shorter than
+# Values here are milliseconds (config-facing; see conf/events/default.yaml's
+# comment for why -- converted to seconds at the EventCfg boundary in
+# experiment/orchestrator.py).
+#
+# APE3's emulated deadline budget is ~412.4ms (nav/mcu_cycle_model.py:
+# APE_LATENCY_US["APE3"] / 1000, see nav/gem5_measured_latencies.py --
+# this is the RAW gem5-measured compute cost with no additive scheduling/
+# contention overhead term). This budget moves with the native planner's
+# own gem5-measured cost AND with the active gem5 CPU profile -- it was
+# ~19.64ms under the faster cortex_m4_168mhz.py profile (STM32F405 @
+# 168MHz) and jumped ~21x to ~412ms when the live default switched to
+# cortex_m3_8mhz.py (STM32F103C8 @ 8MHz, chosen specifically so APE3's
+# budget lands in a physically meaningful range against the sim's
+# deadline model rather than negligible against it -- see
+# docs/POWER_MODEL.md's "Is this realistic?" section). Re-derive the
+# numbers below (3.5x this budget) after any native planner OR CPU profile
+# change that shows up in `make switch-processor`'s output, rather than
+# assuming they still hold. Two things can make APE3 "miss" under
+# events/default.yaml:
+#   1. deadline_min_ms floor (147ms) now sits BELOW that budget (was
+#      comfortably above it under the old, faster profile), so the clamp's
+#      lower bound alone can hand out deadlines APE3 can't make even with
+#      the whole race to itself.
+#   2. event_dt_min_ms (50ms) allows inter-arrival gaps far shorter than
 #      APE3's budget, so a new event can arrive and preempt an in-flight
 #      APE3 computation before it ever resolves.
-# Both are raised here to ~3.5x APE3's budget for margin against sim-time
-# jitter, so every event's deadline and every inter-arrival gap comfortably
-# exceeds APE3's worst case. event_dt_max_s widened proportionally to keep
-# the same log-uniform spread shape; deadline_alpha/event_mix/event_seed
-# are left untouched so the only thing that changed is timing headroom.
-event_dt_min_s: 0.5
-event_dt_max_s: 4.5
+# Both are raised here to ~3.5x APE3's budget (412.4ms * 3.5 ~= 1443ms,
+# rounded to 1440ms) for margin against sim-time jitter, so every event's
+# deadline and every inter-arrival gap comfortably exceeds APE3's worst
+# case. event_dt_max_ms kept at the same 9x ratio over event_dt_min_ms
+# this file has always used (1440 * 9 = 12960) to preserve the log-uniform
+# spread shape; deadline_alpha/deadline_max_ms/event_mix/event_seed are
+# left untouched -- deadline_max_ms in particular is the literature-cited
+# reaction-time ceiling (docs/POWER_MODEL.md), not derived from APE3's
+# compute cost (the clamp just caps deadlines drawn from the widened
+# event_dt_max_ms down to 3500ms, still far above APE3's ~412ms budget).
+event_dt_min_ms: 1440.0
+event_dt_max_ms: 12960.0
 deadline_alpha: 0.85
-deadline_min_s: 0.5
-deadline_max_s: 3.50
+deadline_min_ms: 1440.0
+deadline_max_ms: 3500.0

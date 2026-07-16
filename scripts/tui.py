@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Terminal UI for picking Hydra config-group presets before launching
 run.py. Cycles through one preset per group (run/sim/events/physics,
-discovered from conf/<group>/*.yaml) plus a gui on/off toggle, then execs
-`python run.py <group>=<preset> ... [gui=true]` with the current selections.
+discovered from conf/<group>/*.yaml) plus a gui on/off toggle and a worker
+count, then execs `python run.py <group>=<preset> ... [gui=true]
+[workers=N]` with the current selections. gui=true and workers>1 are kept
+mutually exclusive (see _enforce_gui_workers_exclusion) since interactive
+mode is single-process.
 
 Arrow keys / j,k move between rows; left/right / h,l cycle the selected
 row's value; enter launches; q quits without running.
@@ -28,6 +31,15 @@ _GROUPS = ["run", "sim", "events", "physics"]
 _GUI_DESCRIPTIONS = {
     "false": "Headless batch mode (p.DIRECT, no sleep pacing).",
     "true": "Interactive PyBullet GUI demo (chase camera, live HUD overlay).",
+}
+_WORKERS_OPTIONS = ["1", "2", "4", "8", "16", "32"]
+_WORKERS_DESCRIPTIONS = {
+    "1": "Single process (today's default) -- required for gui=true.",
+    "2": "Fan attempts out across 2 worker processes.",
+    "4": "Fan attempts out across 4 worker processes.",
+    "8": "Fan attempts out across 8 worker processes.",
+    "16": "Fan attempts out across 16 worker processes.",
+    "32": "Fan attempts out across 32 worker processes (one per core on a 32-core box).",
 }
 
 
@@ -55,6 +67,8 @@ def _build_rows() -> list[dict]:
     rows = [{"label": g, "values": _discover_presets(g), "idx": 0} for g in _GROUPS]
     gui_values = [{"name": v, "description": d} for v, d in _GUI_DESCRIPTIONS.items()]
     rows.append({"label": "gui", "values": gui_values, "idx": 0})
+    workers_values = [{"name": v, "description": _WORKERS_DESCRIPTIONS[v]} for v in _WORKERS_OPTIONS]
+    rows.append({"label": "workers", "values": workers_values, "idx": 0})
     return rows
 
 
@@ -66,9 +80,31 @@ def _command_for(rows: list[dict]) -> list[str]:
             if name == "true":
                 cmd.append("gui=true")
             continue
+        if row["label"] == "workers":
+            if name != "1":
+                cmd.append(f"workers={name}")
+            continue
         if name != "default":
             cmd.append(f"{row['label']}={name}")
     return cmd
+
+
+def _row(rows: list[dict], label: str) -> dict:
+    return next(r for r in rows if r["label"] == label)
+
+
+def _enforce_gui_workers_exclusion(rows: list[dict], changed_label: str) -> None:
+    """gui=true needs a single interactive process (orchestrator.main()
+    raises otherwise) -- keep the two rows mutually exclusive rather than
+    letting the picker build a command that fails at launch."""
+    gui_row, workers_row = _row(rows, "gui"), _row(rows, "workers")
+    gui_true = gui_row["values"][gui_row["idx"]]["name"] == "true"
+    workers_gt1 = workers_row["values"][workers_row["idx"]]["name"] != "1"
+    if gui_true and workers_gt1:
+        if changed_label == "gui":
+            workers_row["idx"] = 0
+        else:
+            gui_row["idx"] = 0
 
 
 def _draw(stdscr, rows: list[dict], selected: int) -> None:
@@ -113,9 +149,13 @@ def _main(stdscr) -> list[str] | None:
         elif key in (curses.KEY_LEFT, ord("h")):
             row = rows[selected]
             row["idx"] = (row["idx"] - 1) % len(row["values"])
+            if row["label"] in ("gui", "workers"):
+                _enforce_gui_workers_exclusion(rows, row["label"])
         elif key in (curses.KEY_RIGHT, ord("l")):
             row = rows[selected]
             row["idx"] = (row["idx"] + 1) % len(row["values"])
+            if row["label"] in ("gui", "workers"):
+                _enforce_gui_workers_exclusion(rows, row["label"])
         elif key in (curses.KEY_ENTER, 10, 13):
             return _command_for(rows)
         elif key in (ord("q"), 27):  # 27 = Esc
